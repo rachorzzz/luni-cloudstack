@@ -1,0 +1,27 @@
+---
+- name: Install NFS client packages
+  ansible.builtin.package:
+    name:
+      - nfs-common
+    state: present
+
+- name: Create NFS mount point for primary storage
+  ansible.builtin.file:
+    path: /mnt/primary
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Mount NFS primary storage
+  ansible.posix.mount:
+    src: "{{ nfs_server_ip }}:{{ nfs_primary_export }}"
+    path: /mnt/primary
+    fstype: nfs
+    opts: "vers=4,rsize=131072,wsize=131072,hard,timeo=600,retrans=3"
+    state: mounted
+
+- name: Verify NFS mount is accessible
+  ansible.builtin.command:
+    cmd: mountpoint -q /mnt/primary
+  changed_when: false

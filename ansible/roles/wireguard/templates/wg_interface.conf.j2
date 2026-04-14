@@ -1,0 +1,21 @@
+# Managed by Ansible — do not edit manually
+# Interface: {{ wg_interface }} | Host: {{ inventory_hostname }}
+# Generated: {{ ansible_date_time.iso8601 }}
+
+[Interface]
+Address    = {{ wg_ip }}/24
+ListenPort = {{ wg_port }}
+PrivateKey = {{ wg_private_key }}
+
+# ── Peers (full mesh) ─────────────────────────────────────────────────────────
+{% for peer in groups['wireguard_mesh'] %}
+{% if peer != inventory_hostname %}
+
+# {{ peer }}
+[Peer]
+PublicKey           = {{ hostvars[peer]['wg_public_key'] }}
+Endpoint            = {{ hostvars[peer]['wg_endpoint'] }}:{{ wg_port }}
+AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32
+PersistentKeepalive = {{ wg_keepalive }}
+{% endif %}
+{% endfor %}

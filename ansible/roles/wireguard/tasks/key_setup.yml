@@ -1,0 +1,52 @@
+---
+- name: Install WireGuard
+  ansible.builtin.package:
+    name: wireguard
+    state: present
+
+- name: Ensure WireGuard config directory exists
+  ansible.builtin.file:
+    path: "{{ wg_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+# ── Key generation ────────────────────────────────────────────────────────────
+
+- name: Check if private key already exists
+  ansible.builtin.stat:
+    path: "{{ wg_private_key_file }}"
+  register: wg_privkey_stat
+
+- name: Generate WireGuard private key
+  ansible.builtin.shell:
+    cmd: "wg genkey > {{ wg_private_key_file }}"
+  when: not wg_privkey_stat.stat.exists
+
+- name: Set private key file permissions
+  ansible.builtin.file:
+    path: "{{ wg_private_key_file }}"
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Derive public key from private key
+  ansible.builtin.shell:
+    cmd: "wg pubkey < {{ wg_private_key_file }} > {{ wg_public_key_file }}"
+  when: not wg_privkey_stat.stat.exists
+
+- name: Read private key
+  ansible.builtin.slurp:
+    src: "{{ wg_private_key_file }}"
+  register: wg_private_key_b64
+
+- name: Read public key
+  ansible.builtin.slurp:
+    src: "{{ wg_public_key_file }}"
+  register: wg_public_key_b64
+
+- name: Store keys as host facts
+  ansible.builtin.set_fact:
+    wg_private_key: "{{ wg_private_key_b64.content | b64decode | trim }}"
+    wg_public_key: "{{ wg_public_key_b64.content | b64decode | trim }}"

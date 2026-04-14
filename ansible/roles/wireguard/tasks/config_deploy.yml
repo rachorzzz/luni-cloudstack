@@ -1,0 +1,28 @@
+---
+# ── Config deployment ─────────────────────────────────────────────────────────
+
+- name: Deploy WireGuard interface config
+  ansible.builtin.template:
+    src: wg_interface.conf.j2
+    dest: "{{ wg_config_dir }}/{{ wg_interface }}.conf"
+    owner: root
+    group: root
+    mode: '0600'
+  notify: Restart WireGuard
+
+# ── Service ───────────────────────────────────────────────────────────────────
+
+- name: Enable and start WireGuard interface
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wg_interface }}"
+    enabled: true
+    state: started
+
+# ── Firewall ──────────────────────────────────────────────────────────────────
+
+- name: Allow WireGuard port through UFW (if UFW is active)
+  community.general.ufw:
+    rule: allow
+    port: "{{ wg_port }}"
+    proto: udp
+  ignore_errors: true   # Non-fatal — not all hosts may use UFW

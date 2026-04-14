@@ -1,0 +1,47 @@
+---
+# Phase 1 — Foundation
+# Deploys: NFS server, MySQL, CloudStack management server
+# Run this first and verify the UI is reachable before Phase 2.
+#
+# Usage: ansible-playbook phase1_foundation.yml
+
+- name: Phase 1a — NFS server on main-hp
+  hosts: nfs_server
+  become: true
+  roles:
+    - nfs_server
+
+- name: Phase 1b — MySQL on main-hp
+  hosts: cloudstack_management
+  become: true
+  roles:
+    - mysql
+
+- name: Phase 1c — CloudStack management server on main-hp
+  hosts: cloudstack_management
+  become: true
+  roles:
+    - cloudstack_management
+
+- name: Phase 1 complete — verify management UI
+  hosts: localhost
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Check CloudStack UI is reachable
+      ansible.builtin.uri:
+        url: "http://172.16.100.3:8080/client"
+        status_code: 200
+        timeout: 30
+      register: ui_check
+      retries: 10
+      delay: 15
+      until: ui_check.status == 200
+
+    - name: Print access info
+      ansible.builtin.debug:
+        msg:
+          - "CloudStack UI is UP"
+          - "URL:      http://172.16.100.3:8080/client"
+          - "Username: admin"
+          - "Password: password (change immediately)"

@@ -1,0 +1,64 @@
+---
+# ── KVM prerequisites ─────────────────────────────────────────────────────────
+
+- name: Install KVM and CloudStack agent packages
+  ansible.builtin.package:
+    name:
+      - qemu-kvm
+      - libvirt-daemon-system
+      - libvirt-clients
+      - bridge-utils
+      - cpu-checker
+      - cloudstack-agent
+    state: present
+
+- name: Verify KVM hardware support
+  ansible.builtin.command: kvm-ok
+  register: kvm_ok
+  changed_when: false
+  failed_when: "'KVM acceleration can NOT be used' in kvm_ok.stdout"
+
+# ── libvirt config ────────────────────────────────────────────────────────────
+
+- name: Enable libvirtd
+  ansible.builtin.systemd:
+    name: libvirtd
+    enabled: true
+    state: started
+
+- name: Configure libvirt to listen on TCP (required by CloudStack)
+  ansible.builtin.lineinfile:
+    path: /etc/libvirt/libvirtd.conf
+    regexp: "^#?{{ item.key }}"
+    line: "{{ item.key }} = {{ item.value }}"
+  loop:
+    - { key: "listen_tls", value: "0" }
+    - { key: "listen_tcp", value: "1" }
+    - { key: "tcp_port",   value: '"16509"' }
+    - { key: "auth_tcp",   value: '"none"' }
+    - { key: "mdns_adv",   value: "0" }
+  notify: Restart libvirt
+
+- name: Enable libvirtd TCP listening via service args
+  ansible.builtin.lineinfile:
+    path: /etc/default/libvirtd
+    regexp: "^#?libvirtd_opts"
+    line: 'libvirtd_opts="-l"'
+  notify: Restart libvirt
+
+# ── CloudStack agent config ───────────────────────────────────────────────────
+
+- name: Deploy CloudStack agent config
+  ansible.builtin.template:
+    src: agent.properties.j2
+    dest: /etc/cloudstack/agent/agent.properties
+    owner: root
+    group: cloudstack
+    mode: '0640'
+  notify: Restart cloudstack-agent
+
+- name: Enable and start CloudStack agent
+  ansible.builtin.systemd:
+    name: cloudstack-agent
+    enabled: true
+    state: started

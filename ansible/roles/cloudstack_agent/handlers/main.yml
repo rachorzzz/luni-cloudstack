@@ -1,0 +1,10 @@
+---
+- name: Restart libvirt
+  ansible.builtin.systemd:
+    name: libvirtd
+    state: restarted
+
+- name: Restart cloudstack-agent
+  ansible.builtin.systemd:
+    name: cloudstack-agent
+    state: restarted

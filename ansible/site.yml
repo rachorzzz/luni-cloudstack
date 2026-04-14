@@ -1,0 +1,65 @@
+---
+# ── Play 1: Install WireGuard and collect all public keys ──────────────────────
+# All hosts run in parallel.  Each host stores its public key as a host fact
+# (wg_public_key), which Ansible makes available to all other hosts via hostvars.
+# No shared-dict race condition — no serial needed.
+- name: Install WireGuard and collect public keys
+  hosts: wireguard_mesh
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Gather minimal facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+  tasks:
+    - name: Install WireGuard and collect keys
+      ansible.builtin.include_role:
+        name: wireguard
+        tasks_from: key_setup
+
+# ── Play 2: Deploy configs, start service, verify mesh ─────────────────────────
+# All host public keys are now in hostvars — full mesh configs can be rendered.
+- name: Deploy WireGuard configs and verify mesh
+  hosts: wireguard_mesh
+  become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Gather minimal facts
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+  tasks:
+    - name: Deploy WireGuard config and start service
+      ansible.builtin.include_role:
+        name: wireguard
+        tasks_from: config_deploy
+
+  post_tasks:
+    - name: Wait 5 seconds for tunnels to establish
+      ansible.builtin.pause:
+        seconds: 5
+      run_once: true
+
+    - name: Verify mesh connectivity — ping all peers from each host
+      ansible.builtin.command:
+        cmd: "ping -c 3 -W 2 {{ hostvars[peer]['wg_ip'] }}"
+      loop: "{{ groups['wireguard_mesh'] | reject('equalto', inventory_hostname) | list }}"
+      loop_control:
+        loop_var: peer
+        label: "{{ inventory_hostname }} -> {{ peer }} ({{ hostvars[peer]['wg_ip'] }})"
+      register: ping_results
+      ignore_errors: true   # Report failures but don't abort
+
+    - name: Show connectivity summary
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} -> {{ item.peer }}:
+          {% if item.rc == 0 %}OK{% else %}FAILED{% endif %}
+      loop: "{{ ping_results.results }}"
+      loop_control:
+        label: "{{ item.peer }}"

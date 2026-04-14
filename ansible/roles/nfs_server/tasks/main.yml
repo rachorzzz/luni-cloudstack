@@ -1,0 +1,44 @@
+---
+- name: Install NFS server packages
+  ansible.builtin.package:
+    name:
+      - nfs-kernel-server
+      - nfs-common
+    state: present
+
+- name: Create export directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0777'
+  loop: "{{ nfs_exports }}"
+
+- name: Deploy /etc/exports
+  ansible.builtin.template:
+    src: exports.j2
+    dest: /etc/exports
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Re-export NFS shares
+
+- name: Enable and start NFS server
+  ansible.builtin.systemd:
+    name: nfs-kernel-server
+    enabled: true
+    state: started
+
+- name: Allow NFS through UFW
+  community.general.ufw:
+    rule: allow
+    src: "172.16.100.0/24"
+    port: "{{ item }}"
+    proto: "{{ proto }}"
+  loop:
+    - { port: "2049", proto: "tcp" }
+    - { port: "2049", proto: "udp" }
+    - { port: "111",  proto: "tcp" }
+    - { port: "111",  proto: "udp" }
+  ignore_errors: true

@@ -1,0 +1,98 @@
+---
+# ── CloudStack APT repo ───────────────────────────────────────────────────────
+
+- name: Install prerequisite packages
+  ansible.builtin.package:
+    name:
+      - apt-transport-https
+      - gnupg
+      - python3-mysqldb
+    state: present
+
+- name: Add CloudStack GPG key
+  ansible.builtin.apt_key:
+    url: "http://download.cloudstack.org/release.asc"
+    state: present
+
+- name: Add CloudStack APT repository
+  ansible.builtin.apt_repository:
+    repo: "deb {{ cs_repo_url }} jammy {{ cs_version }}"
+    filename: cloudstack
+    state: present
+    update_cache: true
+
+# ── Install ───────────────────────────────────────────────────────────────────
+
+- name: Install cloudstack-management
+  ansible.builtin.package:
+    name: cloudstack-management
+    state: present
+
+# ── Database setup ────────────────────────────────────────────────────────────
+
+- name: Check if CloudStack DB is already initialised
+  community.mysql.mysql_query:
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    query: "SELECT COUNT(*) as cnt FROM information_schema.tables WHERE table_schema='cloud' AND table_name='version'"
+  register: cs_db_check
+  changed_when: false
+
+- name: Initialise CloudStack database
+  ansible.builtin.command: >
+    cloudstack-setup-databases
+    {{ mysql_cs_user }}:{{ mysql_cs_password }}@localhost
+    --deploy-as=root:{{ mysql_root_password }}
+  no_log: true
+  when: cs_db_check.query_result[0][0]['cnt'] == 0
+
+# ── System VM template ────────────────────────────────────────────────────────
+
+- name: Ensure secondary storage export is mounted locally
+  ansible.builtin.command:
+    cmd: mountpoint -q {{ nfs_primary_export }}
+  register: sec_mount
+  changed_when: false
+  failed_when: false
+
+- name: Mount secondary storage for seeding system VM template
+  ansible.posix.mount:
+    src: "{{ nfs_server_ip }}:{{ nfs_secondary_export }}"
+    path: /mnt/secondary
+    fstype: nfs
+    opts: "vers=4,hard"
+    state: mounted
+
+- name: Check if system VM template already seeded
+  ansible.builtin.stat:
+    path: /mnt/secondary/template/tmpl/1/1
+  register: sysvm_seeded
+
+- name: Seed system VM template into secondary storage
+  ansible.builtin.command: >
+    /usr/share/cloudstack-common/scripts/storage/secondary/cloud-install-sys-tmplt
+    -m /mnt/secondary
+    -u {{ cs_system_template_url }}
+    -h kvm
+    -F
+  when: not sysvm_seeded.stat.exists
+
+# ── Start management server ───────────────────────────────────────────────────
+
+- name: Run cloudstack-setup-management
+  ansible.builtin.command: cloudstack-setup-management
+  args:
+    creates: /var/log/cloudstack/management/management-server.log
+
+- name: Ensure cloudstack-management service is enabled and started
+  ansible.builtin.systemd:
+    name: cloudstack-management
+    enabled: true
+    state: started
+
+- name: Wait for management server to be ready (port 8080)
+  ansible.builtin.wait_for:
+    host: "{{ cs_management_host }}"
+    port: 8080
+    delay: 15
+    timeout: 300
+    msg: "CloudStack management server did not come up in time"

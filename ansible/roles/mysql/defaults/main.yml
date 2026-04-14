@@ -1,0 +1,5 @@
+---
+mysql_root_password: "cloudstack_root_change_me"
+mysql_cs_password:   "cloudstack_db_change_me"
+mysql_cs_database:   "cloud"
+mysql_cs_user:       "cloud"
