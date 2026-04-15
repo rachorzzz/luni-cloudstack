@@ -26,3 +26,10 @@
     port: "{{ wg_port }}"
     proto: udp
   ignore_errors: true   # Non-fatal — not all hosts may use UFW
+
+- name: Allow all traffic on WireGuard interface through UFW
+  community.general.ufw:
+    rule: allow
+    interface: "{{ wg_interface }}"
+    direction: in
+  ignore_errors: true   # Non-fatal — not all hosts may use UFW

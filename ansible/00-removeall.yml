@@ -1,0 +1,62 @@
+---
+- name: Cleanup CloudStack and MySQL
+  hosts: all
+  become: true
+ 
+  tasks:
+    - name: Stop services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - cloudstack-management
+        - cloudstack-agent
+        - mysql
+      ignore_errors: true
+ 
+    - name: Purge packages
+      ansible.builtin.apt:
+        name:
+          - cloudstack-agent
+          - cloudstack-management
+          - cloudstack-common
+          - cloudstack-ui
+          - cloudstack-usage
+          - mysql-server
+          - mysql-client
+          - mysql-common
+          - mysql-server-core-*
+          - mysql-client-core-*
+          - libmysqlclient*
+          - python3-mysqldb
+          - python3-pymysql
+        state: absent
+        purge: true
+      ignore_errors: true
+ 
+    - name: Remove data and config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/cloudstack
+        - /var/lib/cloudstack
+        - /var/log/cloudstack
+        - /usr/share/cloudstack-common
+        - /usr/share/cloudstack-management
+        - /usr/lib/python3/dist-packages/cloudutils
+        - /etc/mysql
+        - /var/lib/mysql
+        - /var/log/mysql
+        - /var/run/mysqld
+        - /root/.my.cnf
+        - /etc/apt/sources.list.d/cloudstack.list
+ 
+    - name: Autoremove orphaned packages
+      ansible.builtin.apt:
+        autoremove: true
+        purge: true
+ 
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true

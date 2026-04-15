@@ -1,3 +1,0 @@
----
-# Overridden per host/group via inventory vars if needed
-cs_agent_storage_type: local    # Overridden to 'shared' for nfs_cluster group

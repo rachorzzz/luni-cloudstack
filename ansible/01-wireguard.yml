@@ -20,7 +20,6 @@
         name: wireguard
         tasks_from: key_setup
 
-# ── Play 2: Deploy configs, start service, verify mesh ─────────────────────────
 # All host public keys are now in hostvars — full mesh configs can be rendered.
 - name: Deploy WireGuard configs and verify mesh
   hosts: wireguard_mesh

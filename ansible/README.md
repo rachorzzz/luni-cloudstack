@@ -1,66 +1,104 @@
-# WireGuard Full Mesh — CloudStack Management Network
+# homelab-ansible
 
-Deploys a WireGuard full mesh across 5 nodes using `172.16.100.0/24`.
-Tailscale IPs are used as WireGuard endpoints so Network1 nodes
-(not reachable from the internet) can still form direct tunnels.
+Ansible project for CloudStack homelab deployment across 5 nodes.
+Covers WireGuard mesh networking and full CloudStack IaaS setup.
 
-## Node map
+## Infrastructure
 
-| Host     | Tailscale IP      | WireGuard IP   | Location  |
-|----------|-------------------|----------------|-----------|
-| hp-01    | 100.93.75.19      | 172.16.100.1   | Network1  |
-| hp-02    | 100.124.102.103   | 172.16.100.2   | Network1  |
-| main-hp  | 100.68.102.106    | 172.16.100.3   | Network1  |
-| main-1   | 100.117.99.12     | 172.16.100.4   | Hetzner   |
-| main-2   | 100.99.132.72     | 172.16.100.5   | Hetzner   |
+| Host    | Tailscale IP      | WireGuard IP   | Location | Role                          |
+|---------|-------------------|----------------|----------|-------------------------------|
+| hp-01   | 100.93.75.19      | 172.16.100.1   | Network1 | KVM agent — nfs-cluster       |
+| hp-02   | 100.124.102.103   | 172.16.100.2   | Network1 | KVM agent — nfs-cluster       |
+| main-hp | 100.68.102.106    | 172.16.100.3   | Network1 | Management + NFS + KVM agent  |
+| main-1  | 100.117.99.12     | 172.16.100.4   | Hetzner  | KVM agent — local-cluster     |
+| main-2  | 100.99.132.72     | 172.16.100.5   | Hetzner  | KVM agent — local-cluster     |
+
+## CloudStack architecture
+
+```
+Zone: homelab
+└── Pod: main
+    ├── Cluster: nfs-cluster          (live migration enabled)
+    │   ├── Primary: NFS from main-hp (172.16.100.3:/export/primary)
+    │   ├── hp-01
+    │   └── hp-02
+    │
+    └── Cluster: local-cluster
+        ├── Primary: local disk per host
+        ├── main-hp
+        ├── main-1
+        └── main-2
+
+Secondary storage (zone-wide):
+    └── NFS from main-hp (172.16.100.3:/export/secondary)
+```
 
 ## Prerequisites
 
-- Ansible >= 2.14 on your control machine
-- `community.general` collection: `ansible-galaxy collection install community.general`
-- SSH access to all hosts via Tailscale IPs (already in `ansible.cfg`)
-- WireGuard package available (`wireguard` on Ubuntu)
-
-## Usage
-
-### Check interface/port availability first
 ```bash
-# On each host — see what wg interfaces already exist
-ansible wireguard_mesh -m shell -a "ip link show | grep wg"
-
-# Check which ports are in use
-ansible wireguard_mesh -m shell -a "ss -ulnp | grep -E '518'"
+ansible-galaxy collection install \
+  community.general \
+  community.mysql \
+  ansible.posix
 ```
 
-Adjust `wg_interface` and `wg_port` in `group_vars/wireguard_mesh.yml` if needed.
+## Deployment order
 
-### Deploy
+### Step 1 — WireGuard mesh (already done)
 ```bash
-ansible-playbook site.yml
+ansible-playbook wireguard.yml
 ```
 
-The playbook runs `serial: 1` on first run so public keys are collected
-before peer configs are rendered. Subsequent runs are idempotent and
-can run in parallel (remove `serial: 1` from `site.yml` if desired).
-
-### Verify manually
+### Step 2 — Foundation (NFS + MySQL + Management server)
 ```bash
-# On any host
-wg show wg1
-
-# Ping the full mesh from one node
-for ip in 172.16.100.{1..5}; do ping -c1 -W1 $ip && echo "$ip OK" || echo "$ip FAIL"; done
+ansible-playbook phase1_foundation.yml
 ```
+When complete, verify the UI at http://172.16.100.3:8080/client
+Login: admin / password — change this immediately.
 
-### Teardown
+### Step 3 — First compute host
 ```bash
-ansible wireguard_mesh -m systemd -a "name=wg-quick@wg1 state=stopped enabled=false" --become
-ansible wireguard_mesh -m file -a "path=/etc/wireguard/wg1.conf state=absent" --become
+ansible-playbook phase2_first_agent.yml
 ```
+Then in the CloudStack UI, complete zone setup manually:
+1. Infrastructure > Zones > Add Zone
+   - Type: Advanced
+   - Name: homelab
+   - DNS: 8.8.8.8 / 8.8.4.4
+   - Internal DNS: 172.16.100.3
+2. Add Pod (use your LAN range for guest traffic)
+3. Add Cluster: local-cluster, hypervisor: KVM
+4. Add host: 172.16.100.3 (main-hp)
+5. Add primary storage: local
+6. Add secondary storage: NFS 172.16.100.3:/export/secondary
+7. Wait for system VMs to start (~10 min)
 
-## Notes
+### Step 4 — Remaining compute hosts
+```bash
+ansible-playbook phase3_remaining_agents.yml
+```
+Then in the UI:
+- Add Cluster: nfs-cluster, hypervisor: KVM
+- Add hp-01 and hp-02 to nfs-cluster
+- Add primary storage: NFS 172.16.100.3:/export/primary
+- Add main-1 and main-2 to local-cluster
 
-- `PersistentKeepalive = 25` is set on all peers to maintain NAT state
-  for the Network1 nodes that can't accept inbound connections
-- Private keys are generated on each host and never leave the node
-- The playbook is fully idempotent — re-running won't rotate keys
+## Key variables
+
+- group_vars/all.yml          — versions, IPs, NFS paths
+- roles/mysql/defaults/main.yml       — DB passwords (change before running)
+- roles/nfs_server/defaults/main.yml  — export sizes
+
+## Useful commands
+
+```bash
+# Check all agents
+ansible cloudstack_agents -m shell -a "systemctl status cloudstack-agent" --become
+
+# Check NFS mounts
+ansible nfs_cluster -m shell -a "mount | grep nfs"
+
+# Tail management log
+ansible cloudstack_management -m shell \
+  -a "tail -50 /var/log/cloudstack/management/management-server.log" --become
+```

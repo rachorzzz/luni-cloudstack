@@ -1,21 +1,10 @@
 ---
-# CloudStack version
-cs_version: "4.19"
-cs_repo_url: "http://download.cloudstack.org/ubuntu"
+wg_interface: wg5           # Change to wg0 if not already taken on your hosts
+wg_port: 51821              # Choose a port not used by existing WireGuard tunnels
+wg_subnet: "172.16.100.0/24"
+wg_keepalive: 25            # Seconds — keeps NAT state alive, important for Network1 hosts
 
-# Management server host (used in agent configs)
-cs_management_host: "172.16.100.3"   # main-hp WireGuard IP
-cs_management_port: 8250
-
-# NFS server (main-hp WireGuard IP)
-nfs_server_ip: "172.16.100.3"
-nfs_primary_export: "/export/primary"
-nfs_secondary_export: "/export/secondary"
-
-# CloudStack system VM template
-cs_system_template_url: "http://download.cloudstack.org/systemvm/4.22/systemvmtemplate-4.22.0-aarch64-kvm.qcow2.bz2"
-
-mysql_root_password: "cloudstack_root_change_me"
-mysql_cs_password:   "cloudstack_db_change_me"
-mysql_cs_database:   "cloud"
-mysql_cs_user:       "cloud"
+# Key storage paths on the remote host
+wg_config_dir: /etc/wireguard
+wg_private_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_private.key"
+wg_public_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_public.key"
