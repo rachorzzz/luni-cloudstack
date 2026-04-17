@@ -1,0 +1,7 @@
+---
+nfs_exports:
+  - path: /data/cloudstack/primary
+    options: "10.10.2.0/24(rw,async,no_root_squash,no_subtree_check)"
+
+  - path: /data/cloudstack/secondary
+    options: "10.10.2.0/24(rw,async,no_root_squash,no_subtree_check)"

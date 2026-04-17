@@ -1,0 +1,258 @@
+---
+# CloudStack 4.22 — Management Server Reset
+# Target: main-hp (Ubuntu 24.04 Noble)
+# Run: ansible-playbook -i inventory/hosts.yml reset_management.yml
+#
+# What this does:
+#   1. Installs and tunes MySQL 8
+#   2. Adds the CloudStack 4.22 apt repo
+#   3. Installs cloudstack-management
+#   4. Configures /etc/cloudstack/management/db.properties
+#   5. Opens UFW ports
+#   6. Prints the manual init commands to run on the server
+#
+# Prerequisites:
+#   - WireGuard mesh up (172.16.100.0/24)
+#   - VXLAN bridges up (br-mgmt, br-storage, br-guest)
+#   - NFS exports ready on /data/cloudstack/primary and secondary
+
+- name: Install CloudStack 4.22 management server
+  hosts: main-hp
+  become: true
+  vars:
+    cs_version: "4.22"
+    cs_repo: "deb https://download.cloudstack.org/ubuntu noble {{ cs_version }}"
+    cs_repo_key: "https://download.cloudstack.org/release.asc"
+
+    mysql_root_password: "root"
+    mysql_cloud_password: "cloud"
+
+    primary_storage: "/data/cloudstack/primary"
+    secondary_storage: "/data/cloudstack/secondary"
+
+    mgmt_ip: "10.10.1.1"      # br-mgmt IP of main-hp
+
+  tasks:
+
+    # ------------------------------------------------------------------ #
+    #  System prerequisites                                                #
+    # ------------------------------------------------------------------ #
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - wget
+          - python3-pymysql
+          - ntp
+          - curl
+        state: present
+        update_cache: true
+
+    - name: Set hostname to FQDN
+      ansible.builtin.hostname:
+        name: main-hp.cloudstack.local
+
+    - name: Ensure /etc/hosts has FQDN entry
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "^{{ mgmt_ip }}"
+        line: "{{ mgmt_ip }} main-hp.cloudstack.local main-hp"
+
+    # ------------------------------------------------------------------ #
+    #  MySQL 8                                                             #
+    # ------------------------------------------------------------------ #
+
+    - name: Install MySQL server
+      ansible.builtin.apt:
+        name: mysql-server
+        state: present
+
+    - name: Write CloudStack MySQL tuning config
+      ansible.builtin.copy:
+        dest: /etc/mysql/conf.d/cloudstack.cnf
+        mode: "0644"
+        content: |
+          [mysqld]
+          server_id             = 1
+          innodb_rollback_on_timeout = 1
+          innodb_lock_wait_timeout   = 600
+          max_connections            = 1000
+          log_bin                    = mysql-bin
+          binlog_format              = ROW
+          default_authentication_plugin = mysql_native_password
+          sql_mode                   = STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION
+          wait_timeout               = 28800
+          interactive_timeout        = 28800
+
+    - name: Enable and start MySQL
+      ansible.builtin.systemd:
+        name: mysql
+        enabled: true
+        state: restarted
+
+    - name: Set MySQL root password
+      community.mysql.mysql_user:
+        name: root
+        host: localhost
+        password: "{{ mysql_root_password }}"
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        state: present
+      no_log: true
+
+    - name: Write ~/.my.cnf for subsequent mysql tasks
+      ansible.builtin.copy:
+        dest: /root/.my.cnf
+        mode: "0600"
+        content: |
+          [client]
+          user=root
+          password={{ mysql_root_password }}
+
+    - name: Remove anonymous MySQL users
+      community.mysql.mysql_user:
+        name: ""
+        host_all: true
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Remove MySQL test database
+      community.mysql.mysql_db:
+        name: test
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+
+    - name: Create cloud database user
+      community.mysql.mysql_user:
+        name: cloud
+        host: "localhost"
+        password: "{{ mysql_cloud_password }}"
+        priv: "*.*:ALL,GRANT"
+        state: present
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      no_log: true
+
+    # ------------------------------------------------------------------ #
+    #  CloudStack apt repository                                           #
+    # ------------------------------------------------------------------ #
+
+    - name: Add CloudStack GPG key
+      ansible.builtin.shell: |
+        wget -O - {{ cs_repo_key }} | tee /etc/apt/trusted.gpg.d/cloudstack.asc
+      args:
+        creates: /etc/apt/trusted.gpg.d/cloudstack.asc
+
+    - name: Add CloudStack apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/cloudstack.list
+        content: "{{ cs_repo }}\n"
+        mode: "0644"
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    # ------------------------------------------------------------------ #
+    #  CloudStack management server                                        #
+    # ------------------------------------------------------------------ #
+
+    - name: Install cloudstack-management
+      ansible.builtin.apt:
+        name: cloudstack-management
+        state: present
+
+    - name: Confirm Java 17 is active (required by CS 4.22)
+      ansible.builtin.command: update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+      failed_when: false
+      changed_when: false
+
+    # ------------------------------------------------------------------ #
+    #  db.properties                                                       #
+    # ------------------------------------------------------------------ #
+
+    - name: Write db.properties
+      ansible.builtin.copy:
+        dest: /etc/cloudstack/management/db.properties
+        mode: "0640"
+        owner: cloud
+        group: cloud
+        content: |
+          db.cloud.username=cloud
+          db.cloud.password={{ mysql_cloud_password }}
+          db.cloud.host=localhost
+          db.cloud.port=3306
+          db.cloud.name=cloud
+          db.cloud.driver=com.mysql.jdbc.Driver
+          db.usage.username=cloud
+          db.usage.password={{ mysql_cloud_password }}
+          db.usage.host=localhost
+          db.usage.port=3306
+          db.usage.name=cloud_usage
+          db.usage.driver=com.mysql.jdbc.Driver
+      no_log: true
+
+    # ------------------------------------------------------------------ #
+    #  Storage directories                                                 #
+    # ------------------------------------------------------------------ #
+
+    - name: Ensure secondary storage path exists
+      ansible.builtin.file:
+        path: "{{ secondary_storage }}"
+        state: directory
+        owner: cloud
+        group: cloud
+        mode: "0755"
+
+    - name: Ensure primary storage path exists
+      ansible.builtin.file:
+        path: "{{ primary_storage }}"
+        state: directory
+        owner: cloud
+        group: cloud
+        mode: "0755"
+
+    # ------------------------------------------------------------------ #
+    #  UFW                                                                 #
+    # ------------------------------------------------------------------ #
+
+    - name: Allow CloudStack UI/API port (8080)
+      community.general.ufw:
+        rule: allow
+        port: "8080"
+        proto: tcp
+
+    - name: Allow CloudStack console proxy port (8443)
+      community.general.ufw:
+        rule: allow
+        port: "8443"
+        proto: tcp
+
+    # ------------------------------------------------------------------ #
+    #  Manual steps                                                        #
+    # ------------------------------------------------------------------ #
+
+    - name: Print manual initialisation steps
+      ansible.builtin.debug:
+        msg:
+          - "Playbook done. Now run the following on main-hp:"
+          - ""
+          - "  ssh root@{{ ansible_host | default(mgmt_ip) }}"
+          - ""
+          - "  # 1. Drop old databases:"
+          - "  mysql -u root -proot -e 'DROP DATABASE IF EXISTS cloud; DROP DATABASE IF EXISTS cloud_usage;'"
+          - ""
+          - "  # 2. Seed the database:"
+          - "  cloudstack-setup-databases cloud:cloud@localhost --deploy-as=root:root -e file"
+          - ""
+          - "  # 3. Set up management keys and environment:"
+          - "  cloudstack-setup-management"
+          - ""
+          - "  # 4. Start the service:"
+          - "  systemctl start cloudstack-management"
+          - ""
+          - "  # 5. Watch logs:"
+          - "  tail -f /var/log/cloudstack/management/management-server.log"
+          - ""
+          - "  UI: http://{{ mgmt_ip }}:8080/client  (admin / password)"

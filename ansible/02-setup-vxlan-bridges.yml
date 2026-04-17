@@ -112,7 +112,6 @@
         mode: "0644"
         content: |
           # --- vxlan-mgmt (VNI 10) ---
-          auto vxlan-mgmt
           iface vxlan-mgmt inet manual
               pre-up ip link add vxlan-mgmt type vxlan id 10 dev {{ wg_interface }} dstport 4789 nolearning local {{ wg_peers[inventory_hostname] }} || true
               up ip link set vxlan-mgmt mtu {{ vxlan_mtu }} up
@@ -125,7 +124,6 @@
               post-down ip link del vxlan-mgmt || true
 
           # --- vxlan-storage (VNI 20) ---
-          auto vxlan-storage
           iface vxlan-storage inet manual
               pre-up ip link add vxlan-storage type vxlan id 20 dev {{ wg_interface }} dstport 4789 nolearning local {{ wg_peers[inventory_hostname] }} || true
               up ip link set vxlan-storage mtu {{ vxlan_mtu }} up
@@ -138,7 +136,6 @@
               post-down ip link del vxlan-storage || true
 
           # --- vxlan-guest (VNI 30) ---
-          auto vxlan-guest
           iface vxlan-guest inet manual
               pre-up ip link add vxlan-guest type vxlan id 30 dev {{ wg_interface }} dstport 4789 nolearning local {{ wg_peers[inventory_hostname] }} || true
               up ip link set vxlan-guest mtu {{ vxlan_mtu }} up
@@ -151,7 +148,6 @@
               post-down ip link del vxlan-guest || true
 
           # --- br-mgmt ---
-          auto br-mgmt
           iface br-mgmt inet static
               address {{ host_bridge_ips[inventory_hostname].mgmt }}
               bridge_ports vxlan-mgmt
@@ -161,7 +157,6 @@
               mtu {{ bridge_mtu }}
 
           # --- br-storage ---
-          auto br-storage
           iface br-storage inet static
               address {{ host_bridge_ips[inventory_hostname].storage }}
               bridge_ports vxlan-storage
@@ -171,13 +166,56 @@
               mtu {{ bridge_mtu }}
 
           # --- br-guest (no IP — CloudStack owns this bridge) ---
-          auto br-guest
           iface br-guest inet manual
               bridge_ports vxlan-guest
               bridge_stp off
               bridge_fd 0
               bridge_maxwait 0
               mtu {{ bridge_mtu }}
+
+    # ------------------------------------------------------------------ #
+    #  Systemd service — brings up the overlay AFTER WireGuard          #
+    #  The interfaces have no "auto" stanza so networking.service        #
+    #  never races them; this unit owns the lifecycle instead.           #
+    # ------------------------------------------------------------------ #
+
+    - name: Write cloudstack-overlay systemd service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/cloudstack-overlay.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=CloudStack VXLAN overlay interfaces
+          After=network.target wg-quick@{{ wg_interface }}.service
+          BindsTo=wg-quick@{{ wg_interface }}.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/bin/sh -c ' \
+            ifup vxlan-mgmt vxlan-storage vxlan-guest && \
+            ifup br-mgmt br-storage br-guest && \
+            bridge link set dev vxlan-mgmt learning off && \
+            bridge link set dev vxlan-storage learning off && \
+            bridge link set dev vxlan-guest learning off'
+          ExecStop=/bin/sh -c ' \
+            ifdown br-guest br-storage br-mgmt 2>/dev/null || true; \
+            ifdown vxlan-guest vxlan-storage vxlan-mgmt 2>/dev/null || true; \
+            ip link del br-guest 2>/dev/null || true; \
+            ip link del br-storage 2>/dev/null || true; \
+            ip link del br-mgmt 2>/dev/null || true; \
+            ip link del vxlan-guest 2>/dev/null || true; \
+            ip link del vxlan-storage 2>/dev/null || true; \
+            ip link del vxlan-mgmt 2>/dev/null || true'
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Enable cloudstack-overlay service
+      ansible.builtin.systemd:
+        name: cloudstack-overlay
+        enabled: true
+        daemon_reload: true
 
     # ------------------------------------------------------------------ #
     #  Bring up interfaces — force teardown first so ifupdown state is  #
@@ -223,7 +261,7 @@
     # ------------------------------------------------------------------ #
 
     - name: Disable MAC learning on VXLAN bridge ports
-      ansible.builtin.command: bridge link set dev {{ item }} learning off flood off
+      ansible.builtin.command: bridge link set dev {{ item }} learning off
       loop:
         - vxlan-mgmt
         - vxlan-storage

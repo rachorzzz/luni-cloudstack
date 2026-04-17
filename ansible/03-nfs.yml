@@ -1,0 +1,15 @@
+---
+# NFS storage — main-hp exports /data/cloudstack/{primary,secondary} over br-storage (10.10.2.0/24)
+# All other hosts mount via 10.10.2.1 into /mnt/{primary,secondary}
+
+- name: Configure NFS server (main-hp)
+  hosts: nfs_server
+  become: true
+  roles:
+    - nfs_server
+
+- name: Configure NFS clients
+  hosts: nfs_clients
+  become: true
+  roles:
+    - nfs_client
