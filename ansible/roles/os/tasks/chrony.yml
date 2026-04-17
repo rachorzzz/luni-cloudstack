@@ -1,0 +1,32 @@
+---
+- name: Install chrony
+  ansible.builtin.apt:
+    name: chrony
+    state: present
+
+- name: Remove pool lines from chrony.conf
+  ansible.builtin.lineinfile:
+    path: /etc/chrony/chrony.conf
+    regexp: "^pool"
+    state: absent
+  notify: Restart chrony
+
+- name: Remove server lines from chrony.conf
+  ansible.builtin.lineinfile:
+    path: /etc/chrony/chrony.conf
+    regexp: "^server"
+    state: absent
+  notify: Restart chrony
+
+- name: Ensure config set in chrony.conf
+  ansible.builtin.lineinfile:
+    path: /etc/chrony/chrony.conf
+    line: "{{ chrony_line }}"
+  notify: Restart chrony
+
+- name: Allow clients to query chrony (master only)
+  ansible.builtin.lineinfile:
+    path: /etc/chrony/chrony.conf
+    line: "allow 172.16.100.0/24"
+  when: inventory_hostname in groups['chrony_master']
+  notify: Restart chrony

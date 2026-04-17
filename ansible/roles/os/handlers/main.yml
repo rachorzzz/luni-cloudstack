@@ -1,0 +1,27 @@
+#SPDX-License-Identifier: MIT-0
+---
+# handlers file for os
+
+- name: Restart chrony
+  ansible.builtin.service:
+    name: chrony
+    state: restarted
+    enabled: true
+
+- name: Restart rabbitmq
+  ansible.builtin.service:
+    name: rabbitmq-server
+    state: restarted
+    enabled: true
+
+- name: Restart mariadb
+  ansible.builtin.service:
+    name: mariadb
+    state: restarted
+    enabled: true
+
+- name: Restart memcached
+  ansible.builtin.service:
+    name: memcached
+    state: restarted
+    enabled: true

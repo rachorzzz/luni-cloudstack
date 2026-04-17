@@ -29,3 +29,5 @@
         state: unmounted
       loop: "{{ nfs_mounts.stdout_lines }}"
       when: nfs_mounts.stdout_lines | length > 0
+
+      # be a bitch and use umount -a -t nfs,nfs4 -f -l on the host for killing stuff

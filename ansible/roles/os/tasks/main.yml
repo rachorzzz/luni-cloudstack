@@ -1,0 +1,25 @@
+---
+# tasks file for os
+
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+
+- name: Include controllers tasks
+  ansible.builtin.include_tasks:
+    file: controllers.yml
+  when: inventory_hostname in groups['controllers']
+
+- name: Ensure /etc/hosts entries for all wireguard hosts
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: "^{{ hostvars[item]['wg_ip'] }}\\s"
+    line: "{{ hostvars[item]['wg_ip'] }} {{ item }}"
+  loop: "{{ groups['wireguard_mesh'] }}"
+
+
+- name: Include chrony tasks
+  ansible.builtin.include_tasks:
+    file: chrony.yml
+
