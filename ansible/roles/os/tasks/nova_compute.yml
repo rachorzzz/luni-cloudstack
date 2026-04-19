@@ -1,0 +1,69 @@
+---
+- name: Install nova-compute and OVN packages
+  ansible.builtin.package:
+    name:
+      - nova-compute
+      - ovn-host
+      - openvswitch-switch
+      - qemu-kvm
+      - libvirt-daemon-system
+      - libvirt-clients
+    state: present
+
+- name: Unmask libvirtd sockets (masked by default on Ubuntu 24.04)
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    masked: false
+  loop:
+    - libvirtd.socket
+    - libvirtd-ro.socket
+
+- name: Enable and start libvirtd sockets
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop:
+    - libvirtd.socket
+    - libvirtd-ro.socket
+
+- name: Enable and start libvirtd
+  ansible.builtin.service:
+    name: libvirtd
+    state: started
+    enabled: true
+
+- name: Check libvirt socket
+  ansible.builtin.stat:
+    path: /var/run/libvirt/libvirt-sock
+  register: libvirt_sock
+
+- name: Fail if libvirt socket is missing
+  ansible.builtin.fail:
+    msg: "libvirt socket not found at /var/run/libvirt/libvirt-sock"
+  when: not libvirt_sock.stat.exists
+
+- name: Configure nova-compute
+  ansible.builtin.template:
+    src: nova-compute.conf.j2
+    dest: /etc/nova/nova.conf
+    owner: nova
+    group: nova
+    mode: "0640"
+  notify: Restart nova-compute
+
+- name: Configure OVS for ovn-controller
+  ansible.builtin.command:
+    cmd: >
+      ovs-vsctl set open_vswitch .
+      external-ids:ovn-remote=tcp:{{ hostvars[groups['controllers'][0]]['wg_ip'] }}:6642
+      external-ids:ovn-encap-type=geneve
+      external-ids:ovn-encap-ip={{ wg_ip }}
+      external-ids:ovn-bridge=br-int
+  changed_when: false
+
+- name: Enable and start ovn-host (ovn-controller)
+  ansible.builtin.service:
+    name: ovn-host
+    state: started
+    enabled: true

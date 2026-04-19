@@ -1,0 +1,19 @@
+[ml2]
+type_drivers = local,flat,vlan,geneve
+tenant_network_types = geneve
+mechanism_drivers = ovn
+extension_drivers = port_security
+
+[ml2_type_geneve]
+vni_ranges = 1:65536
+max_header_size = 38
+
+[ml2_type_flat]
+flat_networks = external
+
+[ovn]
+ovn_nb_connection = tcp:{{ wg_ip }}:6641
+ovn_sb_connection = tcp:{{ wg_ip }}:6642
+ovn_l3_scheduler = leastloaded
+ovn_metadata_enabled = true
+enable_distributed_floating_ip = true

@@ -1,0 +1,23 @@
+[DEFAULT]
+
+[database]
+connection = mysql+pymysql://glance:{{ glance_db_pass }}@{{ wg_ip }}/glance
+
+[keystone_authtoken]
+www_authenticate_uri  = http://{{ wg_ip }}:5000
+auth_url              = http://{{ wg_ip }}:5000
+memcached_servers     = {{ wg_ip }}:11211
+auth_type             = password
+project_domain_name   = Default
+user_domain_name      = Default
+project_name          = service
+username              = glance
+password              = {{ glance_pass }}
+
+[paste_deploy]
+flavor = keystone
+
+[glance_store]
+stores = file,http
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/

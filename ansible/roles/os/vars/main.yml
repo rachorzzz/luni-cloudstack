@@ -1,3 +1,12 @@
 #SPDX-License-Identifier: MIT-0
 ---
 # vars file for os
+
+os_admin_env:
+  OS_USERNAME: admin
+  OS_PASSWORD: "{{ keystone_admin_pass }}"
+  OS_PROJECT_NAME: admin
+  OS_USER_DOMAIN_NAME: Default
+  OS_PROJECT_DOMAIN_NAME: Default
+  OS_AUTH_URL: "http://{{ wg_ip }}:5000/v3"
+  OS_IDENTITY_API_VERSION: "3"

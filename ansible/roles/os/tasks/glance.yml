@@ -1,0 +1,61 @@
+---
+- name: Create glance user
+  ansible.builtin.command:
+    cmd: openstack user create --domain default --password {{ glance_pass }} glance
+  environment: "{{ os_admin_env }}"
+  register: result
+  failed_when: result.rc != 0 and "HTTP 409" not in result.stderr
+  changed_when: result.rc == 0
+  no_log: true
+
+- name: Add glance user to service project with admin role
+  ansible.builtin.command:
+    cmd: openstack role add --project service --user glance admin
+  environment: "{{ os_admin_env }}"
+  changed_when: false
+
+- name: Create glance service
+  ansible.builtin.command:
+    cmd: openstack service create --name glance --description "OpenStack Image" image
+  environment: "{{ os_admin_env }}"
+  register: result
+  failed_when: result.rc != 0 and "HTTP 409" not in result.stderr
+  changed_when: result.rc == 0
+
+- name: List existing glance endpoints
+  ansible.builtin.shell:
+    cmd: openstack endpoint list -f value -c "Service Type" -c Interface | awk '/^image / {print $2}'
+  environment: "{{ os_admin_env }}"
+  register: glance_endpoints
+  changed_when: false
+
+- name: Create glance endpoints
+  ansible.builtin.command:
+    cmd: openstack endpoint create --region RegionOne image {{ item }} http://{{ wg_ip }}:9292
+  environment: "{{ os_admin_env }}"
+  loop:
+    - public
+    - internal
+    - admin
+  when: item not in glance_endpoints.stdout_lines
+
+- name: Install glance
+  ansible.builtin.package:
+    name: glance
+    state: present
+
+- name: Configure glance-api
+  ansible.builtin.template:
+    src: glance-api.conf.j2
+    dest: /etc/glance/glance-api.conf
+    owner: glance
+    group: glance
+    mode: "0640"
+  notify: Restart glance-api
+
+- name: Populate glance database
+  ansible.builtin.command:
+    cmd: glance-manage db_sync
+  become: true
+  become_user: glance
+  changed_when: false

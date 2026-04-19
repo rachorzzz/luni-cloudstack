@@ -1,0 +1,15 @@
+[placement_database]
+connection = mysql+pymysql://placement:{{ placement_db_pass }}@{{ wg_ip }}/placement
+
+[api]
+auth_strategy = keystone
+
+[keystone_authtoken]
+auth_url            = http://{{ wg_ip }}:5000/v3
+memcached_servers   = {{ wg_ip }}:11211
+auth_type           = password
+project_domain_name = Default
+user_domain_name    = Default
+project_name        = service
+username            = placement
+password            = {{ placement_pass }}

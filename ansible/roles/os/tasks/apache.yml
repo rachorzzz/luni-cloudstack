@@ -1,0 +1,7 @@
+---
+- name: Set apache2 ServerName
+  ansible.builtin.lineinfile:
+    path: /etc/apache2/apache2.conf
+    regexp: "^ServerName "
+    line: "ServerName {{ wg_ip }}"
+  notify: Restart apache2

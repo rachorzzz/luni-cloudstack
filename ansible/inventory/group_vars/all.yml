@@ -18,3 +18,9 @@ wg_keepalive: 25            # Seconds — keeps NAT state alive, important for N
 wg_config_dir: /etc/wireguard
 wg_private_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_private.key"
 wg_public_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_public.key"
+
+keystone_admin_pass: changeme
+glance_pass: changeme
+placement_pass: changeme
+nova_pass: changeme
+neutron_pass: changeme

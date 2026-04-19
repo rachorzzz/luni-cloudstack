@@ -101,4 +101,7 @@
     line: "-l {{ wg_ip }}"
   notify: Restart memcached
 
-
+- name: Install openstack client package
+  ansible.builtin.package:
+    name: python3-openstackclient
+    state: present

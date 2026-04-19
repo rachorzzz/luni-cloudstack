@@ -1,0 +1,73 @@
+---
+- name: Install keystone and apache2
+  ansible.builtin.package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - keystone
+    - apache2
+    - libapache2-mod-wsgi-py3
+
+- name: Configure keystone
+  ansible.builtin.copy:
+    dest: /etc/keystone/keystone.conf
+    owner: keystone
+    group: keystone
+    mode: "0640"
+    content: |
+      [DEFAULT]
+      log_dir = /var/log/keystone
+
+      [database]
+      connection = mysql+pymysql://keystone:{{ keystone_db_pass }}@{{ wg_ip }}/keystone
+
+      [token]
+      provider = fernet
+  notify: Restart apache2
+
+- name: Populate keystone database
+  ansible.builtin.command:
+    cmd: keystone-manage db_sync
+  become: true
+  become_user: keystone
+  changed_when: false
+
+- name: Initialize fernet keys
+  ansible.builtin.command:
+    cmd: keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+  args:
+    creates: /etc/keystone/fernet-keys/0
+
+- name: Initialize credential keys
+  ansible.builtin.command:
+    cmd: keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+  args:
+    creates: /etc/keystone/credential-keys/0
+
+- name: Bootstrap keystone
+  ansible.builtin.command:
+    cmd: >
+      keystone-manage bootstrap
+      --bootstrap-password {{ keystone_admin_pass }}
+      --bootstrap-admin-url http://{{ wg_ip }}:5000/v3/
+      --bootstrap-internal-url http://{{ wg_ip }}:5000/v3/
+      --bootstrap-public-url http://{{ wg_ip }}:5000/v3/
+      --bootstrap-region-id RegionOne
+  changed_when: false
+  no_log: true
+
+- name: Create admin-openrc for root
+  ansible.builtin.copy:
+    dest: /root/admin-openrc
+    owner: root
+    group: root
+    mode: "0600"
+    content: |
+      export OS_USERNAME=admin
+      export OS_PASSWORD={{ keystone_admin_pass }}
+      export OS_PROJECT_NAME=admin
+      export OS_USER_DOMAIN_NAME=Default
+      export OS_PROJECT_DOMAIN_NAME=Default
+      export OS_AUTH_URL=http://{{ wg_ip }}:5000/v3
+      export OS_IDENTITY_API_VERSION=3
+  no_log: true

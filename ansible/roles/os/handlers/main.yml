@@ -25,3 +25,38 @@
     name: memcached
     state: restarted
     enabled: true
+
+- name: Restart apache2
+  ansible.builtin.service:
+    name: apache2
+    state: restarted
+    enabled: true
+
+- name: Restart glance-api
+  ansible.builtin.service:
+    name: glance-api
+    state: restarted
+    enabled: true
+
+- name: Restart nova
+  ansible.builtin.service:
+    name: "{{ item }}"
+    state: restarted
+    enabled: true
+  loop:
+    - nova-api
+    - nova-scheduler
+    - nova-conductor
+    - nova-novncproxy
+
+- name: Restart neutron-server
+  ansible.builtin.service:
+    name: neutron-server
+    state: restarted
+    enabled: true
+
+- name: Restart nova-compute
+  ansible.builtin.service:
+    name: nova-compute
+    state: restarted
+    enabled: true
