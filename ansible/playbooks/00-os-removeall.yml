@@ -1,0 +1,229 @@
+# SPDX-License-Identifier: MIT-0
+---
+# Completely removes all OpenStack components from every node so that
+# 02-os-setup.yml can be run again on a clean slate.
+#
+# Run order matters:
+#   1. Compute nodes first (stop compute services, clean OVS)
+#   2. Controller last (drop databases, purge packages)
+
+- name: Remove OpenStack compute components from all compute nodes
+  hosts: compute
+  become: true
+  tasks:
+    - name: Stop compute services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - nova-compute
+        - ovn-host
+        - openvswitch-switch
+        - libvirtd
+      ignore_errors: true
+
+    - name: Purge compute packages
+      ansible.builtin.apt:
+        name:
+          - nova-compute
+          - nova-compute-kvm
+          - nova-compute-libvirt
+          - nova-common
+          - python3-nova
+          - ovn-host
+          - openvswitch-switch
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+        state: absent
+        purge: true
+      ignore_errors: true
+
+    - name: Clear OVS external-ids set by nova/neutron
+      ansible.builtin.command:
+        cmd: >
+          ovs-vsctl clear open_vswitch .
+          external-ids:ovn-remote
+          external-ids:ovn-encap-type
+          external-ids:ovn-encap-ip
+          external-ids:ovn-bridge
+          external-ids:ovn-bridge-mappings
+      ignore_errors: true
+
+    - name: Remove br-ex bridge
+      ansible.builtin.command:
+        cmd: ovs-vsctl --if-exists del-br br-ex
+      ignore_errors: true
+
+    - name: Remove br-ex-route systemd unit
+      ansible.builtin.file:
+        path: /etc/systemd/system/br-ex-route.service
+        state: absent
+      notify: Reload systemd
+
+    - name: Remove nova config and data directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nova
+        - /var/lib/nova
+        - /var/log/nova
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+- name: Remove OpenStack controller components from controller
+  hosts: controllers
+  become: true
+  tasks:
+    - name: Stop controller services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - nova-api
+        - nova-scheduler
+        - nova-conductor
+        - nova-novncproxy
+        - neutron-server
+        - glance-api
+        - ovn-northd
+        - ovn-host
+        - openvswitch-switch
+        - apache2
+        - memcached
+        - rabbitmq-server
+        - br-ex-route
+      ignore_errors: true
+
+    - name: Drop OpenStack databases
+      community.mysql.mysql_db:
+        name: "{{ item }}"
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      loop:
+        - keystone
+        - glance
+        - placement
+        - nova
+        - nova_api
+        - nova_cell0
+        - neutron
+      ignore_errors: true
+
+    - name: Drop OpenStack database users
+      community.mysql.mysql_user:
+        name: "{{ item }}"
+        host_all: true
+        state: absent
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+      loop:
+        - keystone
+        - glance
+        - placement
+        - nova
+        - neutron
+      ignore_errors: true
+
+    - name: Purge controller OpenStack packages
+      ansible.builtin.apt:
+        name:
+          - nova-api
+          - nova-scheduler
+          - nova-conductor
+          - nova-novncproxy
+          - nova-compute
+          - nova-compute-kvm
+          - nova-compute-libvirt
+          - nova-common
+          - python3-nova
+          - neutron-server
+          - neutron-plugin-ml2
+          - neutron-common
+          - python3-neutron
+          - python3-neutron-lib
+          - glance
+          - glance-api
+          - glance-common
+          - python3-glance
+          - keystone
+          - keystone-common
+          - python3-keystone
+          - placement-api
+          - placement-common
+          - python3-placement
+          - openstack-dashboard
+        state: absent
+        purge: true
+      ignore_errors: true
+
+    - name: Autoremove orphaned packages
+      ansible.builtin.apt:
+        autoremove: true
+        purge: true
+
+    - name: Clear OVS external-ids on controller
+      ansible.builtin.command:
+        cmd: >
+          ovs-vsctl clear open_vswitch .
+          external-ids:ovn-remote
+          external-ids:ovn-encap-type
+          external-ids:ovn-encap-ip
+          external-ids:ovn-bridge
+          external-ids:ovn-bridge-mappings
+      ignore_errors: true
+
+    - name: Remove br-ex bridge on controller
+      ansible.builtin.command:
+        cmd: ovs-vsctl --if-exists del-br br-ex
+      ignore_errors: true
+
+    - name: Remove br-ex-route systemd unit
+      ansible.builtin.systemd:
+        name: br-ex-route
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    - name: Remove br-ex-route unit file
+      ansible.builtin.file:
+        path: /etc/systemd/system/br-ex-route.service
+        state: absent
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Remove OpenStack config, data and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/nova
+        - /etc/neutron
+        - /etc/glance
+        - /etc/keystone
+        - /etc/placement
+        - /etc/openstack-dashboard
+        - /var/lib/nova
+        - /var/lib/neutron
+        - /var/lib/glance
+        - /var/lib/keystone
+        - /var/lib/placement
+        - /var/log/nova
+        - /var/log/neutron
+        - /var/log/glance
+        - /var/log/keystone
+        - /var/log/placement
+
+    - name: Remove Ubuntu Cloud Archive source (will be re-added by os setup)
+      ansible.builtin.file:
+        path: /etc/apt/sources.list.d/cloudarchive-epoxy.list
+        state: absent
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true

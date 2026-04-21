@@ -1,7 +1,0 @@
----
-- name: OS Setup
-  hosts: all
-  become: true
-
-  roles:
-    - os

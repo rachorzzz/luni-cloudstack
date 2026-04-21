@@ -1,3 +1,0 @@
----
-- name: Re-export NFS shares
-  ansible.builtin.command: exportfs -ra
