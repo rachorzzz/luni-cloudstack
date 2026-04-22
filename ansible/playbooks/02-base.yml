@@ -1,0 +1,45 @@
+---
+# ── Play 1: Install WireGuard and collect all public keys ──────────────────────
+# All hosts run in parallel.  Each host stores its public key as a host fact
+# (wg_public_key), which Ansible makes available to all other hosts via hostvars.
+# No shared-dict race condition — no serial needed.
+- name: Install libvirtd stuff 
+  hosts: all  
+  become: true
+  gather_facts: false
+
+  tasks: 
+    - name: Install virt packages
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - qemu-kvm
+        - libvirt-daemon-system
+        - libvirt-clients
+        - virtinst
+        - bridge-utils
+        - cloud-image-utils
+    - name: Enable and start libvirtd
+      ansible.builtin.service:
+        name: libvirtd
+        state: started
+        enabled: true
+
+    - name: Remove stale CloudStack libvirt hook
+      ansible.builtin.file:
+        path: /etc/libvirt/hooks/qemu
+        state: absent
+
+    - name: Verify libvirt is accessible
+      ansible.builtin.command:
+        cmd: virsh -c qemu:///system list
+      register: virsh_list
+      changed_when: false
+
+    - name: Show virsh output
+      ansible.builtin.debug:
+        var: virsh_list.stdout_lines
+
+
+

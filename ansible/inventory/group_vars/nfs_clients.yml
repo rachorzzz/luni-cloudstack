@@ -1,6 +1,0 @@
----
-cs_agent_storage_type: shared
-
-nfs_server_ip: "10.10.2.1"          # main-hp br-storage address
-nfs_primary_export: /data/cloudstack/primary
-nfs_secondary_export: /data/cloudstack/secondary

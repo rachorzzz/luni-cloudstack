@@ -1,0 +1,16 @@
+---
+- name: Add OpenStack VM entries to /etc/hosts
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED — openstack vms"
+    block: |
+      172.16.102.1   controller-vm
+      172.16.102.2   compute-vm-1
+      172.16.102.3   compute-vm-2
+      172.16.102.4   compute-vm-3
+      172.16.102.5   compute-vm-4
+      172.16.102.6   compute-vm-5
+      172.16.102.7   compute-vm-6
+      172.16.102.8   compute-vm-7
+      172.16.102.9   compute-vm-8
+      172.16.102.10  compute-vm-9

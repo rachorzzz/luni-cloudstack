@@ -1,0 +1,80 @@
+---
+- name: Configure virbr-wg bridge on all compute nodes
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  handlers:
+    - name: Reapply virbr-wg
+      ansible.builtin.shell:
+        cmd: ifdown {{ virbr_wg_name }} || true; ifup {{ virbr_wg_name }}
+
+    - name: Save iptables rules
+      ansible.builtin.command:
+        cmd: netfilter-persistent save
+
+  tasks:
+    - name: Ensure virbr-wg is up
+      ansible.builtin.command:
+        cmd: ifup {{ virbr_wg_name }}
+      register: ifup_result
+      changed_when: ifup_result.rc == 0
+      failed_when: ifup_result.rc != 0 and 'already configured' not in ifup_result.stderr and 'File exists' not in ifup_result.stderr
+    - name: Enable IP forwarding
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+        reload: true
+
+    - name: Configure virbr-wg in /etc/network/interfaces
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        marker: "# {mark} ANSIBLE MANAGED — virbr-wg"
+        insertbefore: "^source"
+        block: |
+          auto {{ virbr_wg_name }}
+          iface {{ virbr_wg_name }} inet manual
+              bridge_ports none
+              bridge_stp off
+              bridge_fd 0
+              mtu {{ virbr_wg_mtu }}
+          {% for vm in vms %}
+              post-up ip route add {{ vm.ip }}/32 dev {{ virbr_wg_name }}
+          {% endfor %}
+          {% for peer in groups['compute'] | reject('equalto', inventory_hostname) %}
+          {% for vm in hostvars[peer]['vms'] %}
+              post-up ip route add {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
+          {% endfor %}
+          {% endfor %}
+      notify: Reapply virbr-wg
+
+    - name: Install iptables-persistent
+      ansible.builtin.package:
+        name: iptables-persistent
+        state: present
+
+    - name: Do not masquerade VM traffic going into WireGuard
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ wg_vm_subnet }}"
+        out_interface: "{{ wg_interface }}"
+        jump: RETURN
+
+    - name: Do not masquerade VM traffic staying on the bridge
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ wg_vm_subnet }}"
+        out_interface: "{{ virbr_wg_name }}"
+        jump: RETURN
+
+    - name: Masquerade VM traffic to internet
+      ansible.builtin.iptables:
+        table: nat
+        chain: POSTROUTING
+        source: "{{ wg_vm_subnet }}"
+        jump: MASQUERADE
+      notify: Save iptables rules

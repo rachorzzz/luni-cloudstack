@@ -1,0 +1,10 @@
+---
+- name: Base OpenStack setup on all VMs
+  hosts: openstack_all
+  become: true
+  gather_facts: false
+
+  roles:
+    - os_chrony
+    - os_hosts
+

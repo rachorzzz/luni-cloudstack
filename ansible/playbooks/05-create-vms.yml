@@ -1,0 +1,121 @@
+---
+- name: Create VMs on compute nodes
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  vars:
+    images_dir: /var/lib/libvirt/images
+    base_image: "{{ images_dir }}/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"
+    vm_disk_size: 50G
+    vm_ram: 12288
+    vm_vcpus: 2
+
+  tasks:
+    - name: Create VM disk (backing file)
+      ansible.builtin.command:
+        cmd: >
+          qemu-img create -f qcow2
+          -b {{ base_image }}
+          -F qcow2
+          {{ images_dir }}/{{ vm.name }}.qcow2
+          {{ vm_disk_size }}
+        creates: "{{ images_dir }}/{{ vm.name }}.qcow2"
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Write user-data
+      ansible.builtin.copy:
+        dest: "/tmp/{{ vm.name }}-user-data"
+        content: |
+          #cloud-config
+          hostname: {{ vm.name }}
+          manage_etc_hosts: true
+          users:
+            - name: rocky
+              sudo: ALL=(ALL) NOPASSWD:ALL
+              shell: /bin/bash
+              lock_passwd: false
+              passwd: "{{ vm_password | password_hash('sha512') }}"
+          chpasswd:
+            expire: false
+          ssh_pwauth: true
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Write meta-data
+      ansible.builtin.copy:
+        dest: "/tmp/{{ vm.name }}-meta-data"
+        content: |
+          instance-id: {{ vm.name }}
+          local-hostname: {{ vm.name }}
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Write network-config
+      ansible.builtin.copy:
+        dest: "/tmp/{{ vm.name }}-network-config"
+        content: |
+          version: 2
+          ethernets:
+            enp1s0:
+              addresses:
+                - {{ vm.ip }}/32
+              routes:
+                - to: 0.0.0.0/0
+                  via: {{ wg_ip }}
+                  on-link: true
+              nameservers:
+                addresses: [1.1.1.1]
+              mtu: 1420
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Build seed ISO
+      ansible.builtin.command:
+        cmd: >
+          cloud-localds {{ images_dir }}/{{ vm.name }}-seed.iso
+          /tmp/{{ vm.name }}-user-data
+          /tmp/{{ vm.name }}-meta-data
+          --network-config /tmp/{{ vm.name }}-network-config
+        creates: "{{ images_dir }}/{{ vm.name }}-seed.iso"
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Check if VM already exists in libvirt
+      ansible.builtin.command:
+        cmd: virsh dominfo {{ vm.name }}
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+        index_var: vm_idx
+      register: vm_check
+      changed_when: false
+      failed_when: false
+
+    - name: Launch VM
+      ansible.builtin.command:
+        cmd: >
+          virt-install
+          --name {{ vm.name }}
+          --ram {{ vm_ram }}
+          --vcpus {{ vm_vcpus }}
+          --cpu host-passthrough
+          --disk path={{ images_dir }}/{{ vm.name }}.qcow2,format=qcow2
+          --disk path={{ images_dir }}/{{ vm.name }}-seed.iso,device=cdrom
+          --network bridge={{ virbr_wg_name }},model=virtio
+          --os-variant rocky9
+          --graphics vnc,listen=0.0.0.0
+          --console pty,target_type=virtio
+          --import
+          --noautoconsole
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+        index_var: vm_idx
+      when: vm_check.results[vm_idx].rc != 0

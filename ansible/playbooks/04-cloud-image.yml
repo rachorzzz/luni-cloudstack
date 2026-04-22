@@ -1,0 +1,23 @@
+---
+- name: Download Rocky Linux cloud image on all compute nodes
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  vars:
+    images_dir: /var/lib/libvirt/images
+    image_url: https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2
+    image_file: "{{ images_dir }}/{{ image_url | basename }}"
+
+  tasks:
+    - name: Ensure images directory exists
+      ansible.builtin.file:
+        path: "{{ images_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Download Rocky Linux 10 cloud image
+      ansible.builtin.get_url:
+        url: "{{ image_url }}"
+        dest: "{{ image_file }}"
+        mode: "0644"
