@@ -3,4 +3,4 @@ ansible_user: rocky
 ansible_password: "{{ vm_password }}"
 ansible_become: true
 ansible_become_password: "{{ vm_password }}"
-ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o ProxyJump=root@{{ bastion_host }}"
+ansible_ssh_common_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump=root@{{ bastion_host }}"

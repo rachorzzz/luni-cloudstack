@@ -9,7 +9,7 @@
     base_image: "{{ images_dir }}/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2"
     vm_disk_size: 50G
     vm_ram: 12288
-    vm_vcpus: 2
+    vm_vcpus: 4
 
   tasks:
     - name: Create VM disk (backing file)
@@ -19,7 +19,7 @@
           -b {{ base_image }}
           -F qcow2
           {{ images_dir }}/{{ vm.name }}.qcow2
-          {{ vm_disk_size }}
+          {{ vm.disk | default(vm_disk_size) }}
         creates: "{{ images_dir }}/{{ vm.name }}.qcow2"
       loop: "{{ vms }}"
       loop_control:
@@ -31,7 +31,7 @@
         content: |
           #cloud-config
           hostname: {{ vm.name }}
-          manage_etc_hosts: true
+          manage_etc_hosts: false
           users:
             - name: rocky
               sudo: ALL=(ALL) NOPASSWD:ALL
@@ -103,7 +103,7 @@
         cmd: >
           virt-install
           --name {{ vm.name }}
-          --ram {{ vm_ram }}
+          --ram {{ vm.ram | default(vm_ram) }}
           --vcpus {{ vm_vcpus }}
           --cpu host-passthrough
           --disk path={{ images_dir }}/{{ vm.name }}.qcow2,format=qcow2

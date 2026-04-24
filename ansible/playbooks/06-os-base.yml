@@ -5,6 +5,7 @@
   gather_facts: false
 
   roles:
+    - os_base
     - os_chrony
     - os_hosts
 

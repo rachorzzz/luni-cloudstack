@@ -1,4 +1,18 @@
 ---
+# Cloud-init adds "127.0.0.1 <hostname> <hostname>" which causes kolla's
+# RabbitMQ precheck to fail — it requires the hostname to resolve uniquely
+# to the api_interface IP, not loopback.
+- name: Get system hostname
+  ansible.builtin.command: hostname -s
+  register: system_hostname
+  changed_when: false
+
+- name: Remove cloud-init 127.0.0.1 hostname alias
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.0\.1\s+{{ system_hostname.stdout }}'
+    state: absent
+
 - name: Add OpenStack VM entries to /etc/hosts
   ansible.builtin.blockinfile:
     path: /etc/hosts
