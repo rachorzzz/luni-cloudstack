@@ -1,0 +1,38 @@
+---
+- name: Deploy helper scripts to controller-vm
+  hosts: openstack_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Copy setup-openstack.sh to /root
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/setup-openstack.sh"
+        dest: /root/setup-openstack.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Copy create-project.sh to /root
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/create-project.sh"
+        dest: /root/create-project.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Copy create-images.sh to /root
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/create-images.sh"
+        dest: /root/create-images.sh
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Copy admin-all-projects.sh to /root
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../scripts/admin-all-projects.sh"
+        dest: /root/admin-all-projects.sh
+        owner: root
+        group: root
+        mode: "0750"

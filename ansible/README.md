@@ -110,6 +110,16 @@ ssh -J root@100.68.102.106 rocky@172.16.102.1
 All `kolla-ansible` commands below are run as root (or via `sudo`) on controller-vm.
 The inventory and config live in `/etc/kolla/` (deployed by playbook 07).
 
+> **Automated path:** `07-kolla-prep.yml` copies `/root/setup-openstack.sh` to controller-vm.
+> This script runs all four kolla steps and the day-1 setup (network, flavors, image) in one go.
+> It is idempotent — safe to re-run after a failed attempt.
+> ```bash
+> sudo bash /root/setup-openstack.sh
+> # Re-run only the day-1 OpenStack setup (skip kolla):
+> sudo bash /root/setup-openstack.sh --skip-kolla
+> ```
+> The manual steps below explain each phase in detail if you need to debug or run selectively.
+
 ---
 
 #### 8.1 Bootstrap servers
@@ -227,16 +237,21 @@ and `nova-api` on controller-vm, plus `nova-compute` on all 9 compute nodes:
 
 ---
 
-#### 8.6 Post-deploy network setup (one-time)
+#### 8.6 Post-deploy one-time admin setup (run once as admin)
 
-Create the flat provider network (backed by `br-ex` / `dummy0`) and a tenant network:
+This sets up the shared infrastructure that all projects will use: the provider network,
+a standard set of flavors, and a public test image. Run these immediately after `post-deploy`.
 
 ```bash
 source /etc/kolla/admin-openrc.sh
+```
 
-# Provider / external network (flat, shared)
+**Provider / external network** (flat, backed by `br-ex` → `dummy0`):
+
+```bash
 openstack network create \
   --share \
+  --external \
   --provider-physical-network physnet1 \
   --provider-network-type flat \
   external
@@ -244,53 +259,44 @@ openstack network create \
 openstack subnet create \
   --network external \
   --subnet-range 192.168.200.0/24 \
+  --no-dhcp \
   --gateway 192.168.200.1 \
-  --dns-nameserver 1.1.1.1 \
   --allocation-pool start=192.168.200.100,end=192.168.200.200 \
   external-subnet
-
-# Tenant / private network for instances
-openstack network create private
-openstack subnet create \
-  --network private \
-  --subnet-range 10.0.0.0/24 \
-  --dns-nameserver 1.1.1.1 \
-  private-subnet
-
-# Router connecting tenant net to external
-openstack router create router1
-openstack router set router1 --external-gateway external
-openstack router add subnet router1 private-subnet
 ```
 
-Upload a test image (CirrOS — tiny ~15 MB test image):
+> **Lab note — floating IP reachability:** `dummy0` has no real uplink, so
+> `192.168.200.x` floating IPs are only reachable from the controller-vm itself
+> (inside the Neutron router namespace) by default. To reach them from your
+> workstation or from the WireGuard hosts, add a static route:
+> ```bash
+> # On your workstation or any hypervisor that has WireGuard
+> sudo ip route add 192.168.200.0/24 via 172.16.102.1
+> ```
+> Then the L3 agent on controller-vm will forward traffic through OVS.
+
+**Standard flavors:**
+
 ```bash
-wget https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img
+openstack flavor create --id 1 --ram 512   --disk 5   --vcpus 1 m1.tiny
+openstack flavor create --id 2 --ram 2048  --disk 20  --vcpus 1 m1.small
+openstack flavor create --id 3 --ram 4096  --disk 40  --vcpus 2 m1.medium
+openstack flavor create --id 4 --ram 8192  --disk 80  --vcpus 4 m1.large
+openstack flavor create --id 5 --ram 16384 --disk 160 --vcpus 8 m1.xlarge
+```
+
+**Public test image** (CirrOS — 15 MB, useful for quick smoke tests):
+
+```bash
+curl -L -o /tmp/cirros-0.6.2-x86_64-disk.img \
+  https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img
+
 openstack image create \
   --disk-format qcow2 \
   --container-format bare \
   --public \
-  --file cirros-0.6.2-x86_64-disk.img \
+  --file /tmp/cirros-0.6.2-x86_64-disk.img \
   cirros-0.6.2
-
-openstack image list
-```
-
-Launch a test instance:
-```bash
-openstack flavor create --ram 512 --disk 1 --vcpus 1 m1.tiny
-openstack keypair create --public-key ~/.ssh/id_ed25519.pub mykey
-
-openstack server create \
-  --flavor m1.tiny \
-  --image cirros-0.6.2 \
-  --network private \
-  --key-name mykey \
-  test-vm
-
-# Watch it boot
-openstack server list
-openstack console log show test-vm
 ```
 
 ---
@@ -312,7 +318,7 @@ Then open `http://localhost:8080` in your browser.
 
 ---
 
-#### 8.8 Useful day-2 commands
+#### 8.8 Kolla container operations
 
 ```bash
 # Check all container health on controller-vm
@@ -334,6 +340,412 @@ kolla-ansible -i /etc/kolla/multinode deploy --tags keystone
 # Pull fresh images and redeploy everything (upgrade)
 kolla-ansible -i /etc/kolla/multinode pull
 kolla-ansible -i /etc/kolla/multinode deploy
+```
+
+---
+
+## Day 2: Running Your First Workload
+
+All commands below assume you are SSH'd into **controller-vm** (`172.16.102.1`).
+Everything from step 9 onward is day-2 OpenStack operation — no kolla or Ansible involved.
+
+```bash
+ssh -J root@100.68.102.106 rocky@172.16.102.1
+source /etc/kolla/admin-openrc.sh
+```
+
+---
+
+### Step 9 — Create a Project and User
+
+OpenStack multi-tenancy is built around **projects** (tenants). Each team or workload
+gets its own project with isolated networks and quotas.
+
+```bash
+# Create a project
+openstack project create --description "My first project" myproject
+
+# Create a user and assign it to the project
+openstack user create --password changeme --project myproject myuser
+openstack role add --project myproject --user myuser member
+
+# Optional: give the user admin rights within the project only
+# openstack role add --project myproject --user myuser admin
+```
+
+Generate a project-scoped openrc for day-to-day use (avoid running everything as admin):
+
+```bash
+cat > ~/myproject-openrc.sh <<'EOF'
+export OS_AUTH_URL=http://172.16.102.1:5000
+export OS_PROJECT_NAME=myproject
+export OS_USERNAME=myuser
+export OS_PASSWORD=changeme
+export OS_USER_DOMAIN_NAME=Default
+export OS_PROJECT_DOMAIN_NAME=Default
+export OS_IDENTITY_API_VERSION=3
+export OS_IMAGE_API_VERSION=2
+EOF
+
+source ~/myproject-openrc.sh
+```
+
+**Set project quotas** (as admin — do this before users start consuming resources):
+
+```bash
+source /etc/kolla/admin-openrc.sh
+
+openstack quota set \
+  --instances 20 \
+  --cores 40 \
+  --ram 81920 \
+  --floating-ips 10 \
+  --networks 5 \
+  --subnets 10 \
+  --routers 3 \
+  --secgroups 20 \
+  --secgroup-rules 100 \
+  myproject
+```
+
+Verify:
+```bash
+openstack quota show myproject
+```
+
+---
+
+### Step 10 — Set Up Networks
+
+Each project gets its own private (tenant) network. Tenant networks use VXLAN overlay
+(`neutron_tenant_network_types: vxlan`), so they are fully isolated between projects.
+
+Switch to the project user:
+```bash
+source ~/myproject-openrc.sh
+```
+
+**Create tenant network and subnet:**
+
+```bash
+openstack network create private
+
+openstack subnet create \
+  --network private \
+  --subnet-range 10.0.0.0/24 \
+  --gateway 10.0.0.1 \
+  --dns-nameserver 1.1.1.1 \
+  private-subnet
+```
+
+**Create a router and connect it to the external (provider) network:**
+
+```bash
+openstack router create router1
+
+# Set the external gateway (admin operation — project users need the 'external' network to be shared)
+openstack router set router1 --external-gateway external
+
+# Plug the tenant subnet into the router
+openstack router add subnet router1 private-subnet
+```
+
+Verify connectivity paths:
+```bash
+openstack network list
+openstack subnet list
+openstack router show router1
+```
+
+The router gets an IP on `192.168.200.x` (the external subnet), which is what floating IPs
+will use as the upstream gateway. Instances on `private` can reach the internet via SNAT
+through this router.
+
+---
+
+### Step 11 — Security Groups
+
+By default, the `default` security group blocks all **inbound** traffic. Add rules to allow
+SSH and ICMP before launching instances.
+
+```bash
+# Allow SSH inbound from anywhere
+openstack security group rule create \
+  --proto tcp \
+  --dst-port 22 \
+  --remote-ip 0.0.0.0/0 \
+  default
+
+# Allow ICMP (ping) inbound from anywhere
+openstack security group rule create \
+  --proto icmp \
+  --remote-ip 0.0.0.0/0 \
+  default
+```
+
+For a stricter setup, create a dedicated security group:
+
+```bash
+openstack security group create web --description "Allow HTTP/S and SSH"
+
+openstack security group rule create --proto tcp --dst-port 22    --remote-ip 0.0.0.0/0 web
+openstack security group rule create --proto tcp --dst-port 80    --remote-ip 0.0.0.0/0 web
+openstack security group rule create --proto tcp --dst-port 443   --remote-ip 0.0.0.0/0 web
+openstack security group rule create --proto icmp                 --remote-ip 0.0.0.0/0 web
+
+openstack security group rule list web
+```
+
+---
+
+### Step 12 — Add a Keypair
+
+Instances are accessed via SSH key injection (cloud-init). Upload your public key:
+
+```bash
+# From your workstation public key (if already on controller-vm)
+openstack keypair create --public-key ~/.ssh/id_ed25519.pub mykey
+
+# Or generate a new keypair and save the private key locally
+openstack keypair create mykey > ~/mykey.pem
+chmod 600 ~/mykey.pem
+```
+
+List registered keypairs:
+```bash
+openstack keypair list
+```
+
+---
+
+### Step 13 — Upload an Image
+
+CirrOS is fine for smoke tests. For real workloads upload a Rocky Linux or Ubuntu image.
+
+**Rocky Linux 10 (GenericCloud):**
+
+```bash
+# Download on controller-vm
+curl -L -o /tmp/Rocky-10-GenericCloud.qcow2 \
+  https://dl.rockylinux.org/pub/rocky/10/images/x86_64/Rocky-10-GenericCloud-Base.latest.x86_64.qcow2
+
+openstack image create \
+  --disk-format qcow2 \
+  --container-format bare \
+  --public \
+  --property os_type=linux \
+  --file /tmp/Rocky-10-GenericCloud.qcow2 \
+  rocky-10
+```
+
+**Ubuntu 24.04 LTS (Noble):**
+
+```bash
+curl -L -o /tmp/ubuntu-24.04-server-cloudimg-amd64.img \
+  https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+
+openstack image create \
+  --disk-format qcow2 \
+  --container-format bare \
+  --public \
+  --property os_type=linux \
+  --file /tmp/ubuntu-24.04-server-cloudimg-amd64.img \
+  ubuntu-24.04
+```
+
+Verify:
+```bash
+openstack image list
+```
+
+Images are stored on the controller-vm under `/var/lib/docker/volumes/` (Glance uses the
+local file backend; `glance_backend_file: yes` in `globals.yml`).
+
+---
+
+### Step 14 — Launch an Instance
+
+With network, security group, keypair, and image ready:
+
+```bash
+openstack server create \
+  --flavor m1.small \
+  --image rocky-10 \
+  --network private \
+  --security-group default \
+  --key-name mykey \
+  --wait \
+  my-vm
+```
+
+Monitor the build:
+```bash
+openstack server list
+openstack server show my-vm
+
+# Tail the cloud-init console log (useful for boot debugging)
+openstack console log show my-vm
+```
+
+Expected `openstack server list` output once booted:
+```
++------+-------+--------+---------------------------+---------+----------+
+| ID   | Name  | Status | Networks                  | Image   | Flavor   |
++------+-------+--------+---------------------------+---------+----------+
+| ...  | my-vm | ACTIVE | private=10.0.0.X          | rocky-10| m1.small |
++------+-------+--------+---------------------------+---------+----------+
+```
+
+---
+
+### Step 15 — Allocate and Assign a Floating IP
+
+The private IP (`10.0.0.x`) is only reachable inside the Neutron tenant network.
+Assign a floating IP from the external pool to reach the VM from outside:
+
+```bash
+# Allocate a floating IP from the external pool
+openstack floating ip create external
+
+# Associate it with the instance
+openstack floating ip list   # note the floating IP address
+
+openstack server add floating ip my-vm <FLOATING_IP>
+```
+
+Verify:
+```bash
+openstack server show my-vm | grep addresses
+# addresses: private=10.0.0.X, 192.168.200.Y
+```
+
+---
+
+### Step 16 — Access the VM
+
+**Option A — from controller-vm via the floating IP** (always works, no extra routing):
+
+```bash
+# Add route to floating IP range on controller-vm if not already reachable
+# (Usually works directly from controller-vm via OVS br-ex)
+ssh -i ~/mykey.pem rocky@192.168.200.Y
+# or for Ubuntu:
+ssh -i ~/mykey.pem ubuntu@192.168.200.Y
+```
+
+**Option B — from your workstation** (requires the static route from step 8.6):
+
+```bash
+# Add once on workstation
+sudo ip route add 192.168.200.0/24 via 172.16.102.1
+
+# Then SSH directly (jump through bastion, then route to floating IP)
+ssh -J root@100.68.102.106 rocky@192.168.200.Y
+```
+
+**Option C — browser console** (no SSH needed, good for debugging):
+
+```bash
+openstack console url show --novnc my-vm
+# Returns a URL — open in browser after forwarding port 6080:
+# ssh -L 6080:172.16.102.1:6080 root@100.68.102.106 -N
+```
+
+---
+
+### Step 17 — Common VM Operations
+
+```bash
+# Stop and start
+openstack server stop my-vm
+openstack server start my-vm
+
+# Reboot (graceful)
+openstack server reboot my-vm
+# Hard reboot
+openstack server reboot --hard my-vm
+
+# Resize to a larger flavor (cold resize — instance must be stopped)
+openstack server stop my-vm
+openstack server resize --flavor m1.medium my-vm
+# Wait for VERIFY_RESIZE status, then confirm:
+openstack server resize confirm my-vm
+
+# Take a snapshot (creates a Glance image from the running disk)
+openstack server image create --name my-vm-snapshot my-vm
+
+# Delete
+openstack server delete my-vm
+```
+
+**Manage floating IPs:**
+
+```bash
+# Detach floating IP
+openstack server remove floating ip my-vm 192.168.200.Y
+
+# Release it back to the pool
+openstack floating ip delete 192.168.200.Y
+
+# List all allocated floating IPs (admin view)
+source /etc/kolla/admin-openrc.sh
+openstack floating ip list --all-projects
+```
+
+---
+
+### Step 18 — Verify Compute Scheduling
+
+Check which hypervisor (compute node) an instance landed on:
+
+```bash
+source /etc/kolla/admin-openrc.sh
+openstack server show my-vm -f json | jq '."OS-EXT-SRV-ATTR:host"'
+```
+
+View resource usage per compute node:
+
+```bash
+openstack host list
+openstack hypervisor list
+openstack hypervisor show compute-vm-1
+```
+
+Check placement:
+```bash
+openstack resource provider list
+openstack resource provider inventory list <UUID>
+```
+
+---
+
+### Step 19 — Multi-Instance Deployment Pattern
+
+To spin up several identical instances:
+
+```bash
+openstack server create \
+  --flavor m1.small \
+  --image rocky-10 \
+  --network private \
+  --security-group default \
+  --key-name mykey \
+  --min 3 \
+  --max 3 \
+  --wait \
+  worker
+
+# Results in worker-1, worker-2, worker-3
+openstack server list --name worker
+```
+
+Assign floating IPs to each:
+```bash
+for vm in $(openstack server list --name worker -f value -c Name); do
+  fip=$(openstack floating ip create external -f value -c floating_ip_address)
+  openstack server add floating ip "$vm" "$fip"
+  echo "$vm -> $fip"
+done
 ```
 
 ---

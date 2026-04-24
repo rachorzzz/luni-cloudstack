@@ -63,6 +63,7 @@
         name:
           - "ansible-core>=2.18,<2.19"
           - "docker"
+          - "python-openstackclient"
         state: present
         executable: pip3
 
@@ -268,3 +269,4 @@
         owner: root
         group: root
         mode: "0644"
+

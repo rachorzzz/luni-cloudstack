@@ -9,7 +9,7 @@ PrivateKey = {{ wg_private_key }}
 
 # ── Peers (full mesh) ─────────────────────────────────────────────────────────
 {% for peer in groups['wireguard_mesh'] %}
-{% if peer != inventory_hostname %}
+{% if peer != inventory_hostname and hostvars[peer]['wg_public_key'] is defined %}
 
 # {{ peer }}
 [Peer]

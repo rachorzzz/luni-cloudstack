@@ -41,11 +41,11 @@
               bridge_fd 0
               mtu {{ virbr_wg_mtu }}
           {% for vm in vms %}
-              post-up ip route add {{ vm.ip }}/32 dev {{ virbr_wg_name }}
+              post-up ip route replace {{ vm.ip }}/32 dev {{ virbr_wg_name }}
           {% endfor %}
           {% for peer in groups['compute'] | reject('equalto', inventory_hostname) %}
           {% for vm in hostvars[peer]['vms'] %}
-              post-up ip route add {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
+              post-up ip route replace {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
           {% endfor %}
           {% endfor %}
       notify: Reapply virbr-wg

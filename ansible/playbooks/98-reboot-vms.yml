@@ -1,0 +1,16 @@
+---
+- name: Reboot all VMs
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Reboot VM
+      ansible.builtin.command:
+        cmd: virsh reboot {{ vm.name }}
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+      register: reboot_result
+      changed_when: reboot_result.rc == 0
+      failed_when: reboot_result.rc != 0 and 'domain is not running' not in reboot_result.stderr and 'failed to get domain' not in reboot_result.stderr

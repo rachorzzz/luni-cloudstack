@@ -1,6 +1,5 @@
 # =============================================================================
 # Kolla-Ansible Multinode Inventory
-# Based on the official kolla-ansible multinode template.
 # Run FROM: controller-vm (172.16.102.1)
 # Compute nodes reached via direct root SSH over the 172.16.102.x WireGuard mesh.
 # Root key auth is set up by playbook 07-kolla-prep.yml.
@@ -14,14 +13,20 @@ localhost ansible_connection=local
 
 [compute]
 compute-vm-1 ansible_host=172.16.102.2 ansible_user=root
-compute-vm-2 ansible_host=172.16.102.3 ansible_user=root
-compute-vm-3 ansible_host=172.16.102.4 ansible_user=root
-compute-vm-4 ansible_host=172.16.102.5 ansible_user=root
-compute-vm-5 ansible_host=172.16.102.6 ansible_user=root
 compute-vm-6 ansible_host=172.16.102.7 ansible_user=root
 compute-vm-7 ansible_host=172.16.102.8 ansible_user=root
 compute-vm-8 ansible_host=172.16.102.9 ansible_user=root
 compute-vm-9 ansible_host=172.16.102.10 ansible_user=root
+compute-vm-10 ansible_host=172.16.102.11 ansible_user=root
+compute-vm-11 ansible_host=172.16.102.17 ansible_user=root
+compute-vm-12 ansible_host=172.16.102.18 ansible_user=root
+compute-vm-13 ansible_host=172.16.102.19 ansible_user=root
+compute-vm-14 ansible_host=172.16.102.20 ansible_user=root
+compute-vm-15 ansible_host=172.16.102.21 ansible_user=root
+compute-vm-16 ansible_host=172.16.102.22 ansible_user=root
+compute-vm-17 ansible_host=172.16.102.23 ansible_user=root
+compute-vm-18 ansible_host=172.16.102.24 ansible_user=root
+compute-vm-19 ansible_host=172.16.102.25 ansible_user=root
 
 [monitoring]
 localhost ansible_connection=local
