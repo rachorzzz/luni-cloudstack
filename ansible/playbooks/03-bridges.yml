@@ -7,19 +7,25 @@
   handlers:
     - name: Reapply virbr-wg
       ansible.builtin.shell:
-        cmd: ifdown {{ virbr_wg_name }} || true; ifup {{ virbr_wg_name }}
+        cmd: |
+          set -e
+          # Bring bridge up if it doesn't exist yet
+          if ! ip link show {{ virbr_wg_name }} &>/dev/null; then
+            ifup {{ virbr_wg_name }}
+          else
+            ip link set {{ virbr_wg_name }} up 2>/dev/null || true
+            ip link set {{ virbr_wg_name }} mtu {{ virbr_wg_mtu }} 2>/dev/null || true
+            # Re-apply all post-up routes from the interfaces file without touching the bridge
+            grep 'post-up ip route' /etc/network/interfaces | sed 's/.*post-up //' | while read -r cmd; do
+              eval "$cmd" 2>/dev/null || true
+            done
+          fi
 
     - name: Save iptables rules
       ansible.builtin.command:
         cmd: netfilter-persistent save
 
   tasks:
-    - name: Ensure virbr-wg is up
-      ansible.builtin.command:
-        cmd: ifup {{ virbr_wg_name }}
-      register: ifup_result
-      changed_when: ifup_result.rc == 0
-      failed_when: ifup_result.rc != 0 and 'already configured' not in ifup_result.stderr and 'File exists' not in ifup_result.stderr
     - name: Enable IP forwarding
       ansible.posix.sysctl:
         name: net.ipv4.ip_forward
@@ -48,6 +54,18 @@
               post-up ip route replace {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
           {% endfor %}
           {% endfor %}
+          {% set controller_ip = hostvars[groups['openstack_controller'][0]]['ansible_host'] %}
+          {% set ns = namespace(found='') %}
+          {% for host in groups['compute'] %}
+          {% for vm in hostvars[host]['vms'] %}
+          {% if vm.ip == controller_ip %}{% set ns.found = host %}{% endif %}
+          {% endfor %}
+          {% endfor %}
+          {% if ns.found == inventory_hostname %}
+              post-up ip route replace 172.16.102.128/25 dev {{ virbr_wg_name }}
+          {% else %}
+              post-up ip route replace 172.16.102.128/25 via {{ hostvars[ns.found]['wg_ip'] }} dev {{ wg_interface }}
+          {% endif %}
       notify: Reapply virbr-wg
 
     - name: Install iptables-persistent

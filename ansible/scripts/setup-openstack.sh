@@ -110,13 +110,13 @@ else
 
   openstack subnet create \
     --network external \
-    --subnet-range 192.168.200.0/24 \
+    --subnet-range 172.16.102.0/24 \
     --no-dhcp \
-    --gateway 192.168.200.1 \
-    --allocation-pool start=192.168.200.100,end=192.168.200.200 \
+    --gateway 172.16.102.1 \
+    --allocation-pool start=172.16.102.128,end=172.16.102.250 \
     external-subnet
 
-  ok "External network + subnet created (192.168.200.100-200)"
+  ok "External network + subnet created (floating IPs: 172.16.102.128-250)"
 fi
 
 # ── Standard flavors ──────────────────────────────────────────────────────────
