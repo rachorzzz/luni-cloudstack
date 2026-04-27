@@ -215,11 +215,71 @@
         state: restarted
 
 # ---------------------------------------------------------------------------
-# Play 4: Create persistent dummy0 interface on all VMs
-# (Kolla needs neutron_external_interface = dummy0 to exist before bootstrap)
+# Play 4: Prepare neutron_external_interface on all VMs
+#
+# Controller VM gets a second NIC (ens6) hot-plugged to virbr-wg on the
+# hypervisor, giving br-ex real L2 connectivity to the provider network.
+# IP forwarding is also enabled so the controller can route floating-IP
+# reply traffic (router namespace → gateway 172.16.102.1 → destination).
+#
+# Compute VMs keep dummy0 since they don't run the L3 agent.
 # ---------------------------------------------------------------------------
-- name: Create dummy0 interface on all VMs
-  hosts: openstack_all
+- name: Prepare neutron external interface on controller VM
+  hosts: openstack_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Enable IP forwarding (persistent)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+        sysctl_file: /etc/sysctl.d/99-forward.conf
+        reload: true
+
+    - name: Check if ens6 already exists
+      ansible.builtin.command:
+        cmd: ip link show ens6
+      register: ens6_check
+      changed_when: false
+      failed_when: false
+
+    - name: Hot-plug second NIC on controller VM via hypervisor
+      delegate_to: "{{ groups['compute'] | map('extract', hostvars) | selectattr('vms', 'defined') | selectattr('vms', 'search', ansible_host) | map(attribute='inventory_hostname') | first | default(omit) }}"
+      ansible.builtin.shell:
+        cmd: |
+          # Find the libvirt domain that has this VM's IP
+          for domain in $(virsh list --name); do
+            if virsh domiflist "$domain" 2>/dev/null | grep -q virbr-wg; then
+              # Check if this domain already has 2+ NICs
+              NIC_COUNT=$(virsh domiflist "$domain" | grep -c virbr-wg)
+              if [ "$NIC_COUNT" -lt 2 ]; then
+                virsh attach-interface "$domain" bridge virbr-wg --model virtio --live --persistent
+                echo "attached to $domain"
+              else
+                echo "already has $NIC_COUNT NICs"
+              fi
+            fi
+          done
+      when: ens6_check.rc != 0
+      ignore_errors: true
+
+    - name: Bring up ens6
+      ansible.builtin.command:
+        cmd: ip link set ens6 up
+      changed_when: false
+      failed_when: false
+
+    - name: Set ens6 MTU to match virbr-wg
+      ansible.builtin.command:
+        cmd: ip link set ens6 mtu 1420
+      changed_when: false
+      failed_when: false
+
+- name: Create dummy0 interface on compute VMs
+  hosts: openstack_compute
   become: true
   gather_facts: false
 
@@ -245,28 +305,11 @@
         ip4: []
         state: present
         autoconnect: true
-      ignore_errors: true  # nmcli dummy type may not be available on older NM
-
-    - name: Fallback — create dummy0 via ip link if nmcli failed
-      ansible.builtin.command:
-        cmd: ip link add dummy0 type dummy
-      changed_when: true
-      failed_when: false
-      when: ansible_facts is not defined  # always attempt as safety net
+      ignore_errors: true
 
     - name: Bring up dummy0
       ansible.builtin.command:
         cmd: ip link set dummy0 up
       changed_when: false
       failed_when: false
-
-    - name: Write udev rule to persist dummy0 on boot
-      ansible.builtin.copy:
-        dest: /etc/udev/rules.d/99-dummy0.rules
-        content: |
-          # Create dummy0 at boot for kolla-ansible neutron external interface
-          ACTION=="add", SUBSYSTEM=="net", KERNEL=="dummy0", RUN+="/sbin/ip link set dummy0 up"
-        owner: root
-        group: root
-        mode: "0644"
 

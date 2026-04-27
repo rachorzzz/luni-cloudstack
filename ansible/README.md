@@ -6,15 +6,15 @@ This repo provisions a multi-host OpenStack cluster on top of KVM VMs, connected
 
 ## Physical Infrastructure
 
-Five bare-metal hosts act as hypervisors (KVM/libvirt). They are in different networks and are connected via a WireGuard full-mesh VPN.
+Five bare-metal hosts act as hypervisors (KVM/libvirt). They are in different networks and are connected via a WireGuard full-mesh VPN. The local hosts (main-hp, hp-01, hp-02) run Ubuntu/Debian; the Hetzner servers (main-1, main-2) run Rocky Linux 10. All playbooks handle both OS families via `ansible_os_family` conditionals.
 
-| Host      | Tailscale/Public IP  | WireGuard IP    | Local LAN IP    |
-|-----------|----------------------|-----------------|-----------------|
-| main-hp   | 100.68.102.106       | 172.16.100.1    | 192.168.0.60    |
-| hp-01     | 100.93.75.19         | 172.16.100.2    | 192.168.0.50    |
-| hp-02     | 100.124.102.103      | 172.16.100.3    | 192.168.0.55    |
-| main-1    | 100.117.99.12        | 172.16.100.4    | (direct)        |
-| main-2    | 100.99.132.72        | 172.16.100.5    | (direct)        |
+| Host      | Tailscale IP         | WireGuard IP    | Public/LAN IP        | OS           |
+|-----------|----------------------|-----------------|----------------------|--------------|
+| main-hp   | 100.68.102.106       | 172.16.100.1    | 192.168.0.60 (LAN)   | Ubuntu       |
+| hp-01     | 100.93.75.19         | 172.16.100.2    | 192.168.0.50 (LAN)   | Ubuntu       |
+| hp-02     | 100.124.102.103      | 172.16.100.3    | 192.168.0.55 (LAN)   | Ubuntu       |
+| main-1    | 100.95.122.45        | 172.16.100.4    | 78.46.68.166 (Hetzner)  | Rocky 10  |
+| main-2    | 100.115.189.79       | 172.16.100.5    | 188.40.66.241 (Hetzner) | Rocky 10  |
 
 - WireGuard interface: `wg5`, port `51821`
 - WireGuard mesh subnet: `172.16.100.0/24`
@@ -43,17 +43,18 @@ Each physical host runs **2 KVM VMs** (Rocky Linux 10, cloud image), provisioned
 - VM disk: 50 GB qcow2 (thin-provisioned, backed by base image); controller gets 150 GB
 - VM RAM: 12 GB, 2 vCPUs each; controller gets 20 GB
 - VM user: `rocky` / password set via `vm_password` in `group_vars/all.yml`
+- VM DNS: defaults to `1.1.1.1`; Hetzner hosts use `213.133.100.100` (Hetzner blocks external DNS at the network level). Controlled by `vm_dns` per-host variable in inventory
 
 ---
 
 ## Networking Design
 
 VMs use `/32` addresses. Each hypervisor host:
-1. Has a `virbr-wg` Linux bridge (no physical ports, MTU 1420).
-2. VMs attach to this bridge as their sole NIC (`enp1s0`).
+1. Has a `virbr-wg` Linux bridge (no physical ports, MTU 1420). On Debian this is created via `/etc/network/interfaces`; on Rocky via a dedicated systemd service (`virbr-wg-setup.service`) to avoid NetworkManager conflicts with libvirt bridge ports.
+2. VMs attach to this bridge as their sole NIC (`ens2`).
 3. The VM's default gateway is the host's WireGuard IP (`172.16.100.x`) set as an on-link route.
 4. The host has `/32` routes for its own VMs pointing to `virbr-wg`, and `/32` routes for remote VMs pointing via the WireGuard peer IP.
-5. iptables: VM-to-VM and VM-to-WireGuard traffic is **not** masqueraded; internet-bound traffic is masqueraded.
+5. NAT: VM-to-VM and VM-to-WireGuard traffic is **not** masqueraded; internet-bound traffic is masqueraded. On Debian hosts this uses iptables-persistent; on Rocky hosts this uses firewalld direct rules.
 
 This means VMs on different physical hosts can reach each other directly through the WireGuard mesh without NAT.
 
@@ -88,11 +89,14 @@ ansible-playbook playbooks/04-cloud-image.yml
 # 5. Create and boot VMs (cloud-init: user, network, hostname)
 ansible-playbook playbooks/05-create-vms.yml
 
-# 6. Base OpenStack prep on all VMs (chrony NTP, /etc/hosts, SELinux off)
+# 6. Harden Hetzner hosts (firewalld, fail2ban, SSH hardening)
+ansible-playbook playbooks/10-hardening.yml
+
+# 7. Base OpenStack prep on all VMs (chrony NTP, /etc/hosts, SELinux off)
 ansible-playbook playbooks/06-os-base.yml
 
-# 7. Install kolla-ansible on controller-vm, deploy kolla config, set up SSH
-#    keys between controller-vm and compute nodes, create dummy0 interface
+# 8. Install kolla-ansible on controller-vm, deploy kolla config, set up SSH
+#    keys between controller-vm and compute nodes, set up neutron external interface
 ansible-playbook playbooks/07-kolla-prep.yml
 
 # Teardown: destroy and delete all VMs
@@ -158,7 +162,8 @@ Common issues and fixes:
 
 | Error | Fix |
 |-------|-----|
-| `dummy0 not found` | Re-run `07-kolla-prep.yml` or `sudo modprobe dummy && sudo ip link add dummy0 type dummy && sudo ip link set dummy0 up` |
+| `ens6 not found` (controller) | Re-run `07-kolla-prep.yml` to hot-plug the second NIC |
+| `dummy0 not found` (compute) | Re-run `07-kolla-prep.yml` or `sudo modprobe dummy && sudo ip link add dummy0 type dummy && sudo ip link set dummy0 up` |
 | `Docker not running` | `sudo systemctl start docker` on the failing node |
 | `NTP not in sync` | Wait for chrony to sync: `chronyc tracking` on each node |
 | `Not enough disk space` | kolla needs ~20 GB free on `/var/lib/docker` |
@@ -246,7 +251,7 @@ a standard set of flavors, and a public test image. Run these immediately after 
 source /etc/kolla/admin-openrc.sh
 ```
 
-**Provider / external network** (flat, backed by `br-ex` → `dummy0`):
+**Provider / external network** (flat, backed by `br-ex` → `ens6` on controller):
 
 ```bash
 openstack network create \
@@ -258,22 +263,17 @@ openstack network create \
 
 openstack subnet create \
   --network external \
-  --subnet-range 192.168.200.0/24 \
+  --subnet-range 172.16.102.0/24 \
   --no-dhcp \
-  --gateway 192.168.200.1 \
-  --allocation-pool start=192.168.200.100,end=192.168.200.200 \
+  --gateway 172.16.102.1 \
+  --allocation-pool start=172.16.102.128,end=172.16.102.250 \
   external-subnet
 ```
 
-> **Lab note — floating IP reachability:** `dummy0` has no real uplink, so
-> `192.168.200.x` floating IPs are only reachable from the controller-vm itself
-> (inside the Neutron router namespace) by default. To reach them from your
-> workstation or from the WireGuard hosts, add a static route:
-> ```bash
-> # On your workstation or any hypervisor that has WireGuard
-> sudo ip route add 192.168.200.0/24 via 172.16.102.1
-> ```
-> Then the L3 agent on controller-vm will forward traffic through OVS.
+> **Floating IP reachability:** Floating IPs are allocated from the `172.16.102.128/25`
+> range. All hypervisor hosts already have a route for `172.16.102.128/25` pointing
+> to the controller VM's host (set up by `03-bridges.yml`), so floating IPs are
+> reachable from any host on the WireGuard mesh without extra routing.
 
 **Standard flavors:**
 
@@ -434,7 +434,7 @@ openstack subnet create \
   --network private \
   --subnet-range 10.0.0.0/24 \
   --gateway 10.0.0.1 \
-  --dns-nameserver 1.1.1.1 \
+  --dns-nameserver 213.133.100.100 \
   private-subnet
 ```
 
@@ -457,9 +457,9 @@ openstack subnet list
 openstack router show router1
 ```
 
-The router gets an IP on `192.168.200.x` (the external subnet), which is what floating IPs
-will use as the upstream gateway. Instances on `private` can reach the internet via SNAT
-through this router.
+The router gets a floating IP from the external pool (`172.16.102.128-250`). Instances on
+`private` can reach the internet via SNAT through this router. Floating IPs from the
+external pool can be assigned to individual instances for inbound access.
 
 ---
 
@@ -616,7 +616,7 @@ openstack server add floating ip my-vm <FLOATING_IP>
 Verify:
 ```bash
 openstack server show my-vm | grep addresses
-# addresses: private=10.0.0.X, 192.168.200.Y
+# addresses: private=10.0.0.X, 172.16.102.Y
 ```
 
 ---
@@ -628,19 +628,19 @@ openstack server show my-vm | grep addresses
 ```bash
 # Add route to floating IP range on controller-vm if not already reachable
 # (Usually works directly from controller-vm via OVS br-ex)
-ssh -i ~/mykey.pem rocky@192.168.200.Y
+ssh -i ~/mykey.pem rocky@172.16.102.Y
 # or for Ubuntu:
-ssh -i ~/mykey.pem ubuntu@192.168.200.Y
+ssh -i ~/mykey.pem ubuntu@172.16.102.Y
 ```
 
 **Option B — from your workstation** (requires the static route from step 8.6):
 
 ```bash
 # Add once on workstation
-sudo ip route add 192.168.200.0/24 via 172.16.102.1
+sudo ip route add 172.16.102.128/25 via 172.16.102.1
 
 # Then SSH directly (jump through bastion, then route to floating IP)
-ssh -J root@100.68.102.106 rocky@192.168.200.Y
+ssh -J root@100.68.102.106 rocky@172.16.102.Y
 ```
 
 **Option C — browser console** (no SSH needed, good for debugging):
@@ -682,10 +682,10 @@ openstack server delete my-vm
 
 ```bash
 # Detach floating IP
-openstack server remove floating ip my-vm 192.168.200.Y
+openstack server remove floating ip my-vm 172.16.102.Y
 
 # Release it back to the pool
-openstack floating ip delete 192.168.200.Y
+openstack floating ip delete 172.16.102.Y
 
 # List all allocated floating IPs (admin view)
 source /etc/kolla/admin-openrc.sh
@@ -770,8 +770,8 @@ done
 
 | Setting                        | Value                  | Reason                                           |
 |-------------------------------|------------------------|--------------------------------------------------|
-| `network_interface`           | enp1s0                 | Single NIC per VM (WireGuard-bridged)            |
-| `neutron_external_interface`  | dummy0                 | No real uplink in nested lab — dummy module      |
+| `network_interface`           | ens2                   | Single NIC per VM (WireGuard-bridged)            |
+| `neutron_external_interface`  | ens6                   | Second NIC on controller (virbr-wg); dummy0 on compute |
 | `kolla_internal_vip_address`  | 172.16.102.1           | Controller's own IP; no HAProxy/keepalived       |
 | `enable_haproxy`              | no                     | Single controller, no HA                         |
 | `neutron_plugin_agent`        | openvswitch            | OVS with VXLAN tenant overlay                    |
@@ -783,21 +783,20 @@ done
 
 **Infrastructure — complete:**
 - WireGuard mesh is up between all 5 physical hosts
-- libvirt is installed and running on all hypervisors
+- libvirt is installed and running on all hypervisors (cross-distro: Debian + Rocky)
 - `virbr-wg` bridge and routing are configured
-- 10 VMs are created and booted with correct IPs, routing, and SSH access
-- Base OpenStack preparation (chrony NTP, `/etc/hosts`, SELinux off, firewalld masked) is done on all VMs
+- VMs are created and booted with correct IPs, routing, and SSH access
+- main-1 and main-2 hardened with firewalld, fail2ban, SSH hardening (`10-hardening.yml`)
+- Base OpenStack preparation (chrony NTP, `/etc/hosts`, SELinux off) is done on all VMs
 
-**OpenStack — pending kolla-ansible deploy (steps 7–8 above):**
-- [ ] `07-kolla-prep.yml` — install kolla-ansible on controller-vm, SSH keys, dummy0
-- [ ] `bootstrap-servers` — Docker on all nodes
-- [ ] `prechecks` — validate config
-- [ ] `deploy` — start all OpenStack containers
-- [ ] `post-deploy` — write openrc, init DB
+**OpenStack — deployed:**
+- kolla-ansible deployed on controller-vm with all services running
+- Day-1 setup complete: external network (`172.16.102.128-250`), flavors, CirrOS image
+- Horizon available at `http://172.16.102.1`
 
-> **Before running `07-kolla-prep.yml`:** replace the `changeme` passwords in
-> `inventory/group_vars/all.yml`. The `keystone_admin_pass` value is injected
-> into kolla's `passwords.yml` by the playbook.
+> **Note:** Replace the `changeme` passwords in `inventory/group_vars/all.yml`
+> before deploying. The `keystone_admin_pass` value is injected into kolla's
+> `passwords.yml` by the playbook.
 
 ---
 
@@ -812,6 +811,7 @@ done
 | `virbr_wg_name`      | Bridge name on hypervisors (`virbr-wg`)          |
 | `virbr_wg_mtu`       | Bridge MTU (`1420`, matches WireGuard overhead)  |
 | `vm_password`        | Password for the `rocky` user in all VMs         |
+| `vm_dns`             | Per-host DNS servers for VMs (default: `1.1.1.1`)|
 | `bastion_host`       | SSH jump host IP for VM access                   |
 | `keystone_db_pass`   | MariaDB password for Keystone (changeme)         |
 | `rabbit_pass`        | RabbitMQ password (changeme)                     |

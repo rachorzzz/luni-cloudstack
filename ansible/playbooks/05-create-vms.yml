@@ -59,18 +59,20 @@
       ansible.builtin.copy:
         dest: "/tmp/{{ vm.name }}-network-config"
         content: |
-          version: 2
-          ethernets:
-            enp1s0:
-              addresses:
-                - {{ vm.ip }}/32
-              routes:
-                - to: 0.0.0.0/0
-                  via: {{ wg_ip }}
-                  on-link: true
-              nameservers:
-                addresses: [1.1.1.1]
+          version: 1
+          config:
+            - type: physical
+              name: ens2
               mtu: 1420
+              subnets:
+                - type: static
+                  address: {{ vm.ip }}
+                  netmask: 255.255.255.255
+                  gateway: {{ wg_ip }}
+                  dns_nameservers:
+                  {% for dns in (vm_dns | default(['1.1.1.1'])) %}
+                    - {{ dns }}
+                  {% endfor %}
       loop: "{{ vms }}"
       loop_control:
         loop_var: vm
@@ -109,9 +111,9 @@
           --disk path={{ images_dir }}/{{ vm.name }}.qcow2,format=qcow2
           --disk path={{ images_dir }}/{{ vm.name }}-seed.iso,device=cdrom
           --network bridge={{ virbr_wg_name }},model=virtio
-          --os-variant rocky9
-          --graphics vnc,listen=0.0.0.0
-          --console pty,target_type=virtio
+          --os-variant rocky-unknown
+          --graphics none
+          --serial pty
           --import
           --noautoconsole
       loop: "{{ vms }}"
@@ -119,3 +121,33 @@
         loop_var: vm
         index_var: vm_idx
       when: vm_check.results[vm_idx].rc != 0
+
+- name: Verify VM connectivity from main-hp
+  hosts: main-hp
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Wait for VMs to boot and cloud-init to finish
+      ansible.builtin.pause:
+        seconds: 180
+
+    - name: Ping all VMs from main-hp
+      ansible.builtin.command:
+        cmd: ping -c 3 -W 2 {{ vm.ip }}
+      loop: "{{ groups['compute'] | map('extract', hostvars) | map(attribute='vms', default=[]) | flatten }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm.name }} ({{ vm.ip }})"
+      register: ping_results
+      ignore_errors: true
+
+    - name: Connectivity summary
+      ansible.builtin.debug:
+        msg: "{{ vm.name }} ({{ vm.ip }}): {{ 'OK' if result.rc == 0 else 'FAILED' }}"
+      loop: "{{ ping_results.results }}"
+      loop_control:
+        loop_var: result
+        label: "{{ result.vm.name }}"
+      vars:
+        vm: "{{ result.vm }}"

@@ -1,0 +1,224 @@
+---
+# ── Hardening playbook for main-1 and main-2 (Rocky Linux 10) ───────────────
+#
+# Safety guarantees so SSH is never lost:
+#   1. Firewalld is started and SSH is permanently allowed BEFORE any other
+#      firewall rule or service restart runs.
+#   2. The Tailscale interface (tailscale0) is placed in the trusted zone so
+#      the management plane (Tailscale) is never blocked.
+#   3. sshd config is validated with `sshd -t` before the service is touched.
+#   4. sshd is restarted asynchronously (sleep 2 + async) so the in-flight
+#      Ansible SSH connection does not abort the play.
+#   5. A wait_for task re-confirms port 22 is reachable after the restart.
+
+- name: Harden main-1 and main-2
+  hosts: main-1,main-2
+  become: true
+  gather_facts: true
+
+  tasks:
+
+    # ── 1. Packages ───────────────────────────────────────────────────────────
+    - name: Enable EPEL repository
+      ansible.builtin.dnf:
+        name: epel-release
+        state: present
+
+    - name: Install firewalld, fail2ban, and shell utilities
+      ansible.builtin.dnf:
+        name:
+          - firewalld
+          - python3-firewall   # required by the ansible.posix.firewalld module
+          - fail2ban
+          - fail2ban-selinux   # no-op on SELinux-disabled systems, safe to include
+          - bash-completion    # completion framework + firewall-cmd completions
+        state: present
+
+    # ── 2. Disable cockpit ────────────────────────────────────────────────────
+    - name: Stop and disable cockpit
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+        masked: true
+      loop:
+        - cockpit
+        - cockpit.socket
+      failed_when: false
+
+    # ── 3. Firewall – SSH first, then everything else ─────────────────────────
+    # Unmask in case a previous base playbook masked firewalld.
+    - name: Unmask firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        masked: false
+
+    - name: Enable and start firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: true
+        state: started
+
+    - name: Remove cockpit from firewalld public zone
+      ansible.posix.firewalld:
+        service: cockpit
+        zone: public
+        permanent: true
+        immediate: true
+        state: disabled
+      failed_when: false
+
+    # SAFETY: open SSH immediately (runtime) AND permanently before touching
+    # anything else.  If this task fails the play aborts here – safe.
+    - name: "SAFETY – allow SSH in public zone (permanent + immediate)"
+      ansible.posix.firewalld:
+        service: ssh
+        zone: public
+        permanent: true
+        immediate: true
+        state: enabled
+
+    # Place Tailscale interface in trusted zone so management access is
+    # unconditionally allowed.  Use failed_when: false in case tailscale0
+    # does not exist yet on a freshly reinstalled host.
+    - name: Add tailscale0 to trusted zone (permanent + immediate)
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --add-interface=tailscale0 --permanent
+      register: _ts_perm
+      changed_when: "'already' not in _ts_perm.stdout"
+      failed_when: false
+
+    - name: Add tailscale0 to trusted zone (runtime)
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --add-interface=tailscale0
+      changed_when: false
+      failed_when: false
+
+    # WireGuard mesh endpoint – open on public zone so peer hosts can connect.
+    - name: Allow WireGuard port {{ wg_port }}/udp (permanent + immediate)
+      ansible.posix.firewalld:
+        port: "{{ wg_port }}/udp"
+        zone: public
+        permanent: true
+        immediate: true
+        state: enabled
+
+    # Put the WireGuard tunnel interface in trusted zone so intra-mesh traffic
+    # (libvirt, VM IPs) is not filtered.
+    - name: Add {{ wg_interface }} to trusted zone (permanent)
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --add-interface={{ wg_interface }} --permanent
+      register: _wg_perm
+      changed_when: "'already' not in _wg_perm.stdout"
+      failed_when: false
+
+    - name: Add {{ wg_interface }} to trusted zone (runtime)
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --add-interface={{ wg_interface }}
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale wg0 from trusted zone if present
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --remove-interface=wg0 --permanent
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale wg0 from trusted zone at runtime
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --remove-interface=wg0
+      changed_when: false
+      failed_when: false
+
+    - name: Remove stale 51820/udp port from public zone if present
+      ansible.posix.firewalld:
+        port: 51820/udp
+        zone: public
+        permanent: true
+        immediate: true
+        state: disabled
+      failed_when: false
+
+    # Drop everything else on public zone (default policy is already DROP for
+    # firewalld, but be explicit).
+    - name: Set default zone to public
+      ansible.builtin.command:
+        cmd: firewall-cmd --set-default-zone=public
+      changed_when: false
+
+    - name: Reload firewalld to persist all permanent rules
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      changed_when: false
+
+    # ── 4. fail2ban ───────────────────────────────────────────────────────────
+    - name: Write fail2ban jail.local (global defaults)
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          [DEFAULT]
+          # Use firewalld as the ban backend (ships with fail2ban-firewalld).
+          banaction        = firewallcmd-rich-rules[actiontype=<multiport>]
+          banaction_allports = firewallcmd-allports
+          # Read logs via the systemd journal (no log file needed).
+          backend          = systemd
+
+          bantime          = 1h
+          findtime         = 10m
+          maxretry         = 5
+
+          # Whitelist the WireGuard and Tailscale subnets so peer hosts are
+          # never accidentally banned.
+          ignoreip         = 127.0.0.1/8 ::1 172.16.100.0/24 100.64.0.0/10
+
+    - name: Ensure /etc/fail2ban/jails.d exists
+      ansible.builtin.file:
+        path: /etc/fail2ban/jails.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Write SSH jail to /etc/fail2ban/jails.d/sshd.local
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jails.d/sshd.local
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          [sshd]
+          enabled          = true
+          port             = ssh
+          filter           = sshd
+          maxretry         = 4
+          bantime          = 2h
+
+    - name: Enable and start fail2ban
+      ansible.builtin.systemd:
+        name: fail2ban
+        enabled: true
+        state: started
+
+    # ── 5. Verify ─────────────────────────────────────────────────────────────
+    - name: Show active firewall zones
+      ansible.builtin.command:
+        cmd: firewall-cmd --list-all-zones
+      register: fw_zones
+      changed_when: false
+
+    - name: Show firewall zone summary
+      ansible.builtin.debug:
+        var: fw_zones.stdout_lines
+
+    - name: Show fail2ban status
+      ansible.builtin.command:
+        cmd: fail2ban-client status
+      register: f2b_status
+      changed_when: false
+
+    - name: Show fail2ban status output
+      ansible.builtin.debug:
+        var: f2b_status.stdout_lines

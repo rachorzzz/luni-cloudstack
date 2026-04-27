@@ -1,8 +1,22 @@
 ---
-- name: Install WireGuard
-  ansible.builtin.package:
+- name: Enable EPEL repository (Rocky/RHEL)
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+  when: ansible_os_family == 'RedHat'
+
+- name: Install WireGuard (Debian)
+  ansible.builtin.apt:
     name: wireguard
     state: present
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+
+- name: Install WireGuard (Rocky/RHEL)
+  ansible.builtin.dnf:
+    name: wireguard-tools
+    state: present
+  when: ansible_os_family == 'RedHat'
 
 - name: Ensure WireGuard config directory exists
   ansible.builtin.file:

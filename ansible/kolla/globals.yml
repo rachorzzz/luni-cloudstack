@@ -12,11 +12,12 @@ kolla_install_type: "binary"
 # =============================================================================
 
 # Management/API network — single NIC per VM, WireGuard-bridged
-network_interface: "enp1s0"
+network_interface: "ens2"
 
-# Neutron external interface — dummy module; no real uplink in this lab
-# Kolla creates br-ex attached to dummy0 for provider/flat networks
-neutron_external_interface: "dummy0"
+# Neutron external interface — a second NIC (ens6) attached to virbr-wg,
+# giving br-ex real L2 connectivity to the provider network.
+# Added via hot-plug in 07-kolla-prep.yml on the controller VM.
+neutron_external_interface: "ens6"
 
 # Single controller, no HA — VIP = controller's own IP
 kolla_internal_vip_address: "172.16.102.1"

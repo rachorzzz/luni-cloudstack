@@ -15,7 +15,9 @@ PrivateKey = {{ wg_private_key }}
 [Peer]
 PublicKey           = {{ hostvars[peer]['wg_public_key'] }}
 Endpoint            = {{ hostvars[peer]['wg_endpoint'] }}:{{ wg_port }}
-AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32{% for vm in hostvars[peer]['vms'] %}, {{ vm.ip }}/32{% endfor %}
+{% set controller_ip = hostvars[groups['openstack_controller'][0]]['ansible_host'] %}
+{% set peer_has_controller = hostvars[peer]['vms'] | selectattr('ip', 'equalto', controller_ip) | list | length > 0 %}
+AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32{% for vm in hostvars[peer]['vms'] %}, {{ vm.ip }}/32{% endfor %}{% if peer_has_controller %}, 172.16.102.128/25{% endif %}
 
 PersistentKeepalive = {{ wg_keepalive }}
 {% endif %}

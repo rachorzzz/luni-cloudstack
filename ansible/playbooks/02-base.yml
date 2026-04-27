@@ -1,35 +1,116 @@
 ---
-# ── Play 1: Install WireGuard and collect all public keys ──────────────────────
-# All hosts run in parallel.  Each host stores its public key as a host fact
-# (wg_public_key), which Ansible makes available to all other hosts via hostvars.
-# No shared-dict race condition — no serial needed.
-- name: Install libvirtd stuff 
-  hosts: all  
+- name: Install libvirtd stuff
+  hosts: main-1,main-2,main-hp,hp-01,hp-02 
   become: true
   gather_facts: false
 
-  tasks: 
-    - name: Install virt packages
-      ansible.builtin.package:
-        name: "{{ item }}"
+  pre_tasks:
+    - name: Gather OS family facts
+      ansible.builtin.setup:
+        gather_subset: ['!all', '!min', 'distribution']
+
+  handlers:
+    - name: Restart libvirtd
+      ansible.builtin.service:
+        name: libvirtd
+        state: restarted
+
+  tasks:
+    - name: Enable EPEL repository (Rocky/RHEL)
+      ansible.builtin.dnf:
+        name: epel-release
         state: present
-      loop:
-        - qemu-kvm
-        - libvirt-daemon-system
-        - libvirt-clients
-        - virtinst
-        - bridge-utils
-        - cloud-image-utils
+      when: ansible_os_family == 'RedHat'
+
+    - name: Install virt packages (Rocky/RHEL)
+      ansible.builtin.dnf:
+        name:
+          - libvirt-daemon-kvm    # meta-package: pulls in qemu-kvm, QEMU driver, and all libvirt drivers
+          - libvirt-client        # replaces libvirt-clients
+          - virt-install          # replaces virtinst
+          - bridge-utils
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Install genisoimage (Rocky/RHEL) – required by cloud-localds
+      ansible.builtin.dnf:
+        name: genisoimage
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    - name: Install cloud-localds script directly from upstream (Rocky/RHEL)
+      ansible.builtin.get_url:
+        url: https://raw.githubusercontent.com/canonical/cloud-utils/main/bin/cloud-localds
+        dest: /usr/local/bin/cloud-localds
+        owner: root
+        group: root
+        mode: "0755"
+      when: ansible_os_family == 'RedHat'
+
+    - name: Install virt packages (Debian/Ubuntu)
+      ansible.builtin.apt:
+        name:
+          - qemu-kvm
+          - libvirt-daemon-system
+          - libvirt-clients
+          - virtinst
+          - bridge-utils
+          - cloud-image-utils
+        state: present
+        update_cache: true
+      when: ansible_os_family == 'Debian'
+
     - name: Enable and start libvirtd
       ansible.builtin.service:
         name: libvirtd
         state: started
         enabled: true
 
-    - name: Remove stale CloudStack libvirt hook
+    - name: Disable VNC in libvirt QEMU config
+      ansible.builtin.lineinfile:
+        path: /etc/libvirt/qemu.conf
+        regexp: '^#?vnc_listen\s*='
+        line: 'vnc_listen = "127.0.0.1"'
+      notify: Restart libvirtd
+
+    - name: Ensure /etc/libvirt/hooks directory exists
+      ansible.builtin.file:
+        path: /etc/libvirt/hooks
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install libvirt qemu hook to put vnet interfaces in trusted zone (Rocky)
+      ansible.builtin.copy:
+        dest: /etc/libvirt/hooks/qemu
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # Managed by Ansible
+          # Adds/removes VM vnet interfaces from firewalld trusted zone so
+          # VM traffic is not rejected by the public zone.
+          DOMAIN="$1"
+          ACTION="$2"
+
+          if [ "$ACTION" = "started" ]; then
+              for iface in $(virsh domiflist "$DOMAIN" 2>/dev/null | awk '/vnet/{print $1}'); do
+                  firewall-cmd --zone=trusted --add-interface="$iface" 2>/dev/null || true
+              done
+          elif [ "$ACTION" = "release" ]; then
+              for iface in $(virsh domiflist "$DOMAIN" 2>/dev/null | awk '/vnet/{print $1}'); do
+                  firewall-cmd --zone=trusted --remove-interface="$iface" 2>/dev/null || true
+              done
+          fi
+      when: ansible_os_family == 'RedHat'
+
+    - name: Remove stale libvirt hook (Debian – hook not needed with UFW)
       ansible.builtin.file:
         path: /etc/libvirt/hooks/qemu
         state: absent
+      when: ansible_os_family == 'Debian'
 
     - name: Verify libvirt is accessible
       ansible.builtin.command:
@@ -40,6 +121,3 @@
     - name: Show virsh output
       ansible.builtin.debug:
         var: virsh_list.stdout_lines
-
-
-

@@ -4,26 +4,46 @@
   become: true
   gather_facts: false
 
+  pre_tasks:
+    - name: Gather OS family facts
+      ansible.builtin.setup:
+        gather_subset: ['!all', '!min', 'distribution']
+
   handlers:
     - name: Reapply virbr-wg
+      # Debian: re-source routes from /etc/network/interfaces
       ansible.builtin.shell:
         cmd: |
           set -e
-          # Bring bridge up if it doesn't exist yet
           if ! ip link show {{ virbr_wg_name }} &>/dev/null; then
             ifup {{ virbr_wg_name }}
           else
             ip link set {{ virbr_wg_name }} up 2>/dev/null || true
             ip link set {{ virbr_wg_name }} mtu {{ virbr_wg_mtu }} 2>/dev/null || true
-            # Re-apply all post-up routes from the interfaces file without touching the bridge
             grep 'post-up ip route' /etc/network/interfaces | sed 's/.*post-up //' | while read -r cmd; do
               eval "$cmd" 2>/dev/null || true
             done
           fi
+      when: ansible_os_family == 'Debian'
 
-    - name: Save iptables rules
+    - name: Restart virbr-wg-setup
+      ansible.builtin.systemd:
+        name: virbr-wg-setup
+        state: restarted
+        daemon_reload: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Restart virbr-wg-routes
+      # Rocky: restart the route service
+      ansible.builtin.systemd:
+        name: virbr-wg-routes
+        state: restarted
+      when: ansible_os_family == 'RedHat'
+
+    - name: Save iptables rules (Debian)
       ansible.builtin.command:
         cmd: netfilter-persistent save
+      when: ansible_os_family == 'Debian'
 
   tasks:
     - name: Enable IP forwarding
@@ -34,7 +54,8 @@
         sysctl_set: true
         reload: true
 
-    - name: Configure virbr-wg in /etc/network/interfaces
+    # ── Debian bridge ─────────────────────────────────────────────────────────
+    - name: Configure virbr-wg in /etc/network/interfaces (Debian)
       ansible.builtin.blockinfile:
         path: /etc/network/interfaces
         marker: "# {mark} ANSIBLE MANAGED — virbr-wg"
@@ -67,32 +88,240 @@
               post-up ip route replace 172.16.102.128/25 via {{ hostvars[ns.found]['wg_ip'] }} dev {{ wg_interface }}
           {% endif %}
       notify: Reapply virbr-wg
+      when: ansible_os_family == 'Debian'
 
-    - name: Install iptables-persistent
-      ansible.builtin.package:
+    # ── Rocky bridge ──────────────────────────────────────────────────────────
+    # NM-managed bridges fight with libvirt: NM removes vnet interfaces that
+    # libvirt dynamically adds as bridge ports.  We create the bridge with a
+    # dedicated systemd service instead, matching the Debian ifupdown approach.
+
+    - name: Tell NetworkManager to ignore virbr-wg (Rocky)
+      ansible.builtin.copy:
+        dest: /etc/NetworkManager/conf.d/99-virbr-wg-unmanaged.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [keyfile]
+          unmanaged-devices=interface-name:{{ virbr_wg_name }}
+      register: _nm_unmanaged
+      when: ansible_os_family == 'RedHat'
+
+    - name: Reload NetworkManager config (Rocky)
+      ansible.builtin.command:
+        cmd: nmcli general reload
+      changed_when: false
+      when:
+        - ansible_os_family == 'RedHat'
+        - _nm_unmanaged.changed
+
+    - name: Delete stale NM virbr-wg connection if present (Rocky)
+      ansible.builtin.command:
+        cmd: nmcli con delete "{{ virbr_wg_name }}"
+      register: _nm_del
+      changed_when: _nm_del.rc == 0
+      failed_when: false
+      when: ansible_os_family == 'RedHat'
+
+    - name: Write virbr-wg bridge setup script (Rocky)
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/virbr-wg-setup.sh
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/bin/bash
+          # Managed by Ansible – create virbr-wg bridge (NM-independent)
+          set -e
+          if ! ip link show {{ virbr_wg_name }} &>/dev/null; then
+              ip link add {{ virbr_wg_name }} type bridge
+          fi
+          ip link set {{ virbr_wg_name }} type bridge stp_state 0
+          ip link set {{ virbr_wg_name }} type bridge forward_delay 0
+          ip link set {{ virbr_wg_name }} mtu {{ virbr_wg_mtu }}
+          ip link set {{ virbr_wg_name }} up
+          # Place in trusted firewalld zone at runtime
+          firewall-cmd --zone=trusted --add-interface={{ virbr_wg_name }} 2>/dev/null || true
+      notify: Restart virbr-wg-setup
+      when: ansible_os_family == 'RedHat'
+
+    - name: Write virbr-wg-setup systemd unit (Rocky)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/virbr-wg-setup.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Create and configure virbr-wg bridge
+          Before=libvirtd.service virbr-wg-routes.service
+          After=firewalld.service network.target
+          Wants=firewalld.service
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/sbin/virbr-wg-setup.sh
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart virbr-wg-setup
+      when: ansible_os_family == 'RedHat'
+
+    - name: Enable and start virbr-wg-setup service (Rocky)
+      ansible.builtin.systemd:
+        name: virbr-wg-setup
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Add virbr-wg to trusted zone permanently (Rocky)
+      ansible.builtin.command:
+        cmd: firewall-cmd --zone=trusted --add-interface={{ virbr_wg_name }} --permanent
+      register: _vbr_zone
+      changed_when: "'ALREADY_ENABLED' not in _vbr_zone.stderr"
+      failed_when: false
+      when: ansible_os_family == 'RedHat'
+
+    - name: Write route script for virbr-wg (Rocky)
+      ansible.builtin.copy:
+        dest: /usr/local/sbin/virbr-wg-routes.sh
+        owner: root
+        group: root
+        mode: "0750"
+        content: |
+          #!/bin/bash
+          # Managed by Ansible – virbr-wg route setup
+          set -e
+          {% for vm in vms %}
+          ip route replace {{ vm.ip }}/32 dev {{ virbr_wg_name }}
+          {% endfor %}
+          {% for peer in groups['compute'] | reject('equalto', inventory_hostname) %}
+          {% for vm in hostvars[peer]['vms'] %}
+          ip route replace {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
+          {% endfor %}
+          {% endfor %}
+          {% set controller_ip = hostvars[groups['openstack_controller'][0]]['ansible_host'] %}
+          {% set ns = namespace(found='') %}
+          {% for host in groups['compute'] %}
+          {% for vm in hostvars[host]['vms'] %}
+          {% if vm.ip == controller_ip %}{% set ns.found = host %}{% endif %}
+          {% endfor %}
+          {% endfor %}
+          {% if ns.found == inventory_hostname %}
+          ip route replace 172.16.102.128/25 dev {{ virbr_wg_name }}
+          {% else %}
+          ip route replace 172.16.102.128/25 via {{ hostvars[ns.found]['wg_ip'] }} dev {{ wg_interface }}
+          {% endif %}
+      notify: Restart virbr-wg-routes
+      when: ansible_os_family == 'RedHat'
+
+    - name: Write systemd unit for virbr-wg routes (Rocky)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/virbr-wg-routes.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Apply virbr-wg VM routes
+          After=network.target wg-quick@{{ wg_interface }}.service virbr-wg-setup.service
+          Wants=wg-quick@{{ wg_interface }}.service
+          Requires=virbr-wg-setup.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/local/sbin/virbr-wg-routes.sh
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart virbr-wg-routes
+      when: ansible_os_family == 'RedHat'
+
+    - name: Enable and start virbr-wg-routes service (Rocky)
+      ansible.builtin.systemd:
+        name: virbr-wg-routes
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: ansible_os_family == 'RedHat'
+
+    # ── Remove conflicting iptables-services on Rocky (cleanup if old playbook ran) ──
+    - name: Stop and remove iptables-services if present (Rocky)
+      ansible.builtin.dnf:
+        name: iptables-services
+        state: absent
+      when: ansible_os_family == 'RedHat'
+      ignore_errors: true
+
+    # ── NAT rules – Debian (iptables-persistent) ─────────────────────────────
+    - name: Install iptables-persistent (Debian)
+      ansible.builtin.apt:
         name: iptables-persistent
         state: present
+      when: ansible_os_family == 'Debian'
 
-    - name: Do not masquerade VM traffic going into WireGuard
+    - name: Do not masquerade VM traffic going into WireGuard (Debian)
       ansible.builtin.iptables:
         table: nat
         chain: POSTROUTING
         source: "{{ wg_vm_subnet }}"
         out_interface: "{{ wg_interface }}"
         jump: RETURN
+      notify: Save iptables rules (Debian)
+      when: ansible_os_family == 'Debian'
 
-    - name: Do not masquerade VM traffic staying on the bridge
+    - name: Do not masquerade VM traffic staying on the bridge (Debian)
       ansible.builtin.iptables:
         table: nat
         chain: POSTROUTING
         source: "{{ wg_vm_subnet }}"
         out_interface: "{{ virbr_wg_name }}"
         jump: RETURN
+      notify: Save iptables rules (Debian)
+      when: ansible_os_family == 'Debian'
 
-    - name: Masquerade VM traffic to internet
+    - name: Masquerade VM traffic to internet (Debian)
       ansible.builtin.iptables:
         table: nat
         chain: POSTROUTING
         source: "{{ wg_vm_subnet }}"
         jump: MASQUERADE
-      notify: Save iptables rules
+      notify: Save iptables rules (Debian)
+      when: ansible_os_family == 'Debian'
+
+    # ── NAT rules – Rocky (firewalld direct rules, no iptables-services) ─────
+    - name: Do not masquerade VM traffic going into WireGuard (Rocky)
+      ansible.builtin.command:
+        cmd: >
+          firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 0
+          -s {{ wg_vm_subnet }} -o {{ wg_interface }} -j RETURN
+      register: _nat_wg
+      changed_when: "'ALREADY_ENABLED' not in _nat_wg.stderr"
+      when: ansible_os_family == 'RedHat'
+
+    - name: Do not masquerade VM traffic staying on the bridge (Rocky)
+      ansible.builtin.command:
+        cmd: >
+          firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 1
+          -s {{ wg_vm_subnet }} -o {{ virbr_wg_name }} -j RETURN
+      register: _nat_br
+      changed_when: "'ALREADY_ENABLED' not in _nat_br.stderr"
+      when: ansible_os_family == 'RedHat'
+
+    - name: Masquerade VM traffic to internet (Rocky)
+      ansible.builtin.command:
+        cmd: >
+          firewall-cmd --permanent --direct --add-rule ipv4 nat POSTROUTING 2
+          -s {{ wg_vm_subnet }} -j MASQUERADE
+      register: _nat_masq
+      changed_when: "'ALREADY_ENABLED' not in _nat_masq.stderr"
+      when: ansible_os_family == 'RedHat'
+
+    - name: Reload firewalld to apply direct NAT rules (Rocky)
+      ansible.builtin.command:
+        cmd: firewall-cmd --reload
+      changed_when: false
+      when: ansible_os_family == 'RedHat'

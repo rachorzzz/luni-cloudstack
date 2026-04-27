@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT-0
 ---
 # Completely removes all OpenStack components from every node so that
-# 02-os-setup.yml can be run again on a clean slate.
+# the setup playbooks can be run again on a clean slate.
 #
 # Run order matters:
 #   1. Compute nodes first (stop compute services, clean OVS)
@@ -10,6 +10,13 @@
 - name: Remove OpenStack compute components from all compute nodes
   hosts: compute
   become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Gather OS family facts
+      ansible.builtin.setup:
+        gather_subset: ['!all', '!min', 'distribution']
+
   tasks:
     - name: Stop compute services
       ansible.builtin.service:
@@ -18,11 +25,11 @@
       loop:
         - nova-compute
         - ovn-host
-        - openvswitch-switch
+        - openvswitch
         - libvirtd
       ignore_errors: true
 
-    - name: Purge compute packages
+    - name: Purge compute packages (Debian)
       ansible.builtin.apt:
         name:
           - nova-compute
@@ -38,6 +45,22 @@
         state: absent
         purge: true
       ignore_errors: true
+      when: ansible_os_family == 'Debian'
+
+    - name: Purge compute packages (Rocky)
+      ansible.builtin.dnf:
+        name:
+          - openstack-nova-compute
+          - python3-nova
+          - ovn-host
+          - openvswitch
+          - qemu-kvm
+          - libvirt-daemon
+          - libvirt-client
+        state: absent
+        autoremove: true
+      ignore_errors: true
+      when: ansible_os_family == 'RedHat'
 
     - name: Clear OVS external-ids set by nova/neutron
       ansible.builtin.command:
@@ -55,7 +78,7 @@
         cmd: ovs-vsctl --if-exists del-br br-ex
       ignore_errors: true
 
-    - name: Remove br-ex-route systemd unit
+    - name: Remove br-ex-route systemd unit file
       ansible.builtin.file:
         path: /etc/systemd/system/br-ex-route.service
         state: absent
@@ -78,8 +101,15 @@
 - name: Remove OpenStack controller components from controller
   hosts: controllers
   become: true
+  gather_facts: false
+
+  pre_tasks:
+    - name: Gather OS family facts
+      ansible.builtin.setup:
+        gather_subset: ['!all', '!min', 'distribution']
+
   tasks:
-    - name: Stop controller services
+    - name: Stop controller services (Debian)
       ansible.builtin.service:
         name: "{{ item }}"
         state: stopped
@@ -98,8 +128,30 @@
         - rabbitmq-server
         - br-ex-route
       ignore_errors: true
+      when: ansible_os_family == 'Debian'
 
-    - name: Drop OpenStack databases
+    - name: Stop controller services (Rocky)
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - openstack-nova-api
+        - openstack-nova-scheduler
+        - openstack-nova-conductor
+        - openstack-nova-novncproxy
+        - neutron-server
+        - openstack-glance-api
+        - ovn-northd
+        - ovn-host
+        - openvswitch
+        - httpd
+        - memcached
+        - rabbitmq-server
+        - br-ex-route
+      ignore_errors: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Drop OpenStack databases (Debian)
       community.mysql.mysql_db:
         name: "{{ item }}"
         state: absent
@@ -113,8 +165,25 @@
         - nova_cell0
         - neutron
       ignore_errors: true
+      when: ansible_os_family == 'Debian'
 
-    - name: Drop OpenStack database users
+    - name: Drop OpenStack databases (Rocky)
+      community.mysql.mysql_db:
+        name: "{{ item }}"
+        state: absent
+        login_unix_socket: /var/lib/mysql/mysql.sock
+      loop:
+        - keystone
+        - glance
+        - placement
+        - nova
+        - nova_api
+        - nova_cell0
+        - neutron
+      ignore_errors: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Drop OpenStack database users (Debian)
       community.mysql.mysql_user:
         name: "{{ item }}"
         host_all: true
@@ -127,8 +196,24 @@
         - nova
         - neutron
       ignore_errors: true
+      when: ansible_os_family == 'Debian'
 
-    - name: Purge controller OpenStack packages
+    - name: Drop OpenStack database users (Rocky)
+      community.mysql.mysql_user:
+        name: "{{ item }}"
+        host_all: true
+        state: absent
+        login_unix_socket: /var/lib/mysql/mysql.sock
+      loop:
+        - keystone
+        - glance
+        - placement
+        - nova
+        - neutron
+      ignore_errors: true
+      when: ansible_os_family == 'RedHat'
+
+    - name: Purge controller OpenStack packages (Debian)
       ansible.builtin.apt:
         name:
           - nova-api
@@ -159,11 +244,37 @@
         state: absent
         purge: true
       ignore_errors: true
+      when: ansible_os_family == 'Debian'
 
-    - name: Autoremove orphaned packages
+    - name: Autoremove orphaned packages (Debian)
       ansible.builtin.apt:
         autoremove: true
         purge: true
+      when: ansible_os_family == 'Debian'
+
+    - name: Purge controller OpenStack packages (Rocky)
+      ansible.builtin.dnf:
+        name:
+          - openstack-nova-api
+          - openstack-nova-scheduler
+          - openstack-nova-conductor
+          - openstack-nova-novncproxy
+          - openstack-nova-compute
+          - python3-nova
+          - openstack-neutron-server
+          - openstack-neutron-ml2
+          - python3-neutron
+          - openstack-glance
+          - python3-glance
+          - openstack-keystone
+          - python3-keystone
+          - openstack-placement-api
+          - python3-placement
+          - openstack-dashboard
+        state: absent
+        autoremove: true
+      ignore_errors: true
+      when: ansible_os_family == 'RedHat'
 
     - name: Clear OVS external-ids on controller
       ansible.builtin.command:
@@ -218,12 +329,3 @@
         - /var/log/glance
         - /var/log/keystone
         - /var/log/placement
-
-    - name: Remove Ubuntu Cloud Archive source (will be re-added by os setup)
-      ansible.builtin.file:
-        path: /etc/apt/sources.list.d/cloudarchive-epoxy.list
-        state: absent
-
-    - name: Update apt cache
-      ansible.builtin.apt:
-        update_cache: true
