@@ -1,8 +1,22 @@
 ---
-- name: Install WireGuard
-  ansible.builtin.package:
+- name: Enable EPEL repository (Rocky/RHEL)
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+  when: ansible_os_family == 'RedHat'
+
+- name: Install WireGuard (Debian)
+  ansible.builtin.apt:
     name: wireguard
     state: present
+    update_cache: true
+  when: ansible_os_family == 'Debian'
+
+- name: Install WireGuard (Rocky/RHEL)
+  ansible.builtin.dnf:
+    name: wireguard-tools
+    state: present
+  when: ansible_os_family == 'RedHat'
 
 - name: Ensure WireGuard config directory exists
   ansible.builtin.file:
@@ -50,3 +64,39 @@
   ansible.builtin.set_fact:
     wg_private_key: "{{ wg_private_key_b64.content | b64decode | trim }}"
     wg_public_key: "{{ wg_public_key_b64.content | b64decode | trim }}"
+
+# ── Client key generation (for road-warrior peers like laptops) ──────────────
+
+- name: Generate WireGuard client keys
+  ansible.builtin.shell:
+    cmd: |
+      PRIVKEY=$(wg genkey)
+      echo "$PRIVKEY" > {{ wg_config_dir }}/client_{{ item.name }}_private.key
+      echo "$PRIVKEY" | wg pubkey > {{ wg_config_dir }}/client_{{ item.name }}_public.key
+      chmod 600 {{ wg_config_dir }}/client_{{ item.name }}_private.key
+    creates: "{{ wg_config_dir }}/client_{{ item.name }}_private.key"
+  loop: "{{ wg_clients | default([]) }}"
+
+- name: Read client public keys
+  ansible.builtin.slurp:
+    src: "{{ wg_config_dir }}/client_{{ item.name }}_public.key"
+  loop: "{{ wg_clients | default([]) }}"
+  register: wg_client_pubkeys
+
+- name: Read client private keys
+  ansible.builtin.slurp:
+    src: "{{ wg_config_dir }}/client_{{ item.name }}_private.key"
+  loop: "{{ wg_clients | default([]) }}"
+  register: wg_client_privkeys
+
+- name: Store client keys as facts
+  ansible.builtin.set_fact:
+    wg_client_keys: >-
+      {{ wg_client_keys | default({}) | combine({
+        item.item.name: {
+          'public': (wg_client_pubkeys.results | selectattr('item.name', 'equalto', item.item.name) | first).content | b64decode | trim,
+          'private': item.content | b64decode | trim
+        }
+      }) }}
+  loop: "{{ wg_client_privkeys.results | default([]) }}"
+  when: wg_clients is defined and wg_clients | length > 0

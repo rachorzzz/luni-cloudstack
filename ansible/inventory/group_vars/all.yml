@@ -1,0 +1,33 @@
+---
+# OpenStack service DB passwords
+keystone_db_pass: changeme
+glance_db_pass: changeme
+placement_db_pass: changeme
+nova_db_pass: changeme
+neutron_db_pass: changeme
+
+# RabbitMQ
+rabbit_pass: changeme
+
+bastion_host: 100.68.102.106  # main-hp — jump host for VM access
+
+wg_interface: wg5           # Change to wg0 if not already taken on your hosts
+wg_port: 51821              # Choose a port not used by existing WireGuard tunnels
+wg_subnet: "172.16.100.0/24"
+wg_keepalive: 25            # Seconds — keeps NAT state alive, important for Network1 hosts
+wg_vm_subnet: "172.16.102.0/24"
+virbr_wg_name: virbr-wg
+virbr_wg_mtu: 1420
+# Key storage paths on the remote host
+wg_config_dir: /etc/wireguard
+wg_private_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_private.key"
+wg_public_key_file: "{{ wg_config_dir }}/{{ wg_interface }}_public.key"
+
+vm_password: rocky123
+
+keystone_admin_pass: changeme
+glance_pass: changeme
+placement_pass: changeme
+nova_pass: changeme
+neutron_pass: changeme
+horizon_secret_key: changeme

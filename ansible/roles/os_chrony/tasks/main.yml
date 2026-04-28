@@ -1,0 +1,26 @@
+---
+- name: Install chrony
+  ansible.builtin.dnf:
+    name: chrony
+    state: present
+
+- name: Set chrony server/pool line
+  ansible.builtin.lineinfile:
+    path: /etc/chrony.conf
+    regexp: "^(pool|server) "
+    line: "{{ chrony_line }}"
+  notify: Restart chronyd
+
+- name: Enable and start chronyd
+  ansible.builtin.service:
+    name: chronyd
+    state: started
+    enabled: true
+
+- name: Allow NTP clients from VM subnet (controller only)
+  ansible.builtin.lineinfile:
+    path: /etc/chrony.conf
+    line: "allow 172.16.102.0/24"
+    state: present
+  notify: Restart chronyd
+  when: "'openstack_controller' in group_names"

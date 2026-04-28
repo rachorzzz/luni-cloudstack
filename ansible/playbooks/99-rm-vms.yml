@@ -1,0 +1,51 @@
+---
+- name: Remove VMs and their disk images
+  hosts: compute
+  become: true
+  gather_facts: false
+
+  vars:
+    images_dir: /var/lib/libvirt/images
+
+  tasks:
+    - name: Destroy VM if running
+      ansible.builtin.command:
+        cmd: virsh destroy {{ vm.name }}
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+      register: destroy_result
+      changed_when: destroy_result.rc == 0
+      failed_when: destroy_result.rc != 0 and 'domain is not running' not in destroy_result.stderr and 'failed to get domain' not in destroy_result.stderr
+
+    - name: Undefine VM
+      ansible.builtin.command:
+        cmd: virsh undefine {{ vm.name }} --remove-all-storage
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+      register: undefine_result
+      changed_when: undefine_result.rc == 0
+      failed_when: undefine_result.rc != 0 and 'failed to get domain' not in undefine_result.stderr
+
+    - name: Remove VM disk image
+      ansible.builtin.file:
+        path: "{{ images_dir }}/{{ vm.name }}.qcow2"
+        state: absent
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Remove VM seed ISO
+      ansible.builtin.file:
+        path: "{{ images_dir }}/{{ vm.name }}-seed.iso"
+        state: absent
+      loop: "{{ vms }}"
+      loop_control:
+        loop_var: vm
+
+    - name: Remove cloud-init temp files
+      ansible.builtin.file:
+        path: "/tmp/{{ item.0.name }}-{{ item.1 }}"
+        state: absent
+      loop: "{{ vms | product(['user-data', 'meta-data', 'network-config']) | list }}"

@@ -18,18 +18,61 @@
     enabled: true
     state: started
 
+# ── Client configs (generated on the server, fetch to control node) ───────────
+
+- name: Generate client WireGuard configs
+  ansible.builtin.template:
+    src: wg_client.conf.j2
+    dest: "{{ wg_config_dir }}/client_{{ item.name }}.conf"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ wg_clients | default([]) }}"
+
+- name: Fetch client configs to control node
+  ansible.builtin.fetch:
+    src: "{{ wg_config_dir }}/client_{{ item.name }}.conf"
+    dest: "{{ playbook_dir }}/../client-configs/{{ inventory_hostname }}_{{ item.name }}.conf"
+    flat: true
+  loop: "{{ wg_clients | default([]) }}"
+
 # ── Firewall ──────────────────────────────────────────────────────────────────
 
-- name: Allow WireGuard port through UFW (if UFW is active)
+- name: Allow WireGuard port through UFW (Debian)
   community.general.ufw:
     rule: allow
     port: "{{ wg_port }}"
     proto: udp
-  ignore_errors: true   # Non-fatal — not all hosts may use UFW
+  when: ansible_os_family == 'Debian'
+  ignore_errors: true
 
-- name: Allow all traffic on WireGuard interface through UFW
+- name: Allow all traffic on WireGuard interface through UFW (Debian)
   community.general.ufw:
     rule: allow
     interface: "{{ wg_interface }}"
     direction: in
-  ignore_errors: true   # Non-fatal — not all hosts may use UFW
+  when: ansible_os_family == 'Debian'
+  ignore_errors: true
+
+- name: Allow WireGuard port through firewalld (Rocky/RHEL)
+  ansible.posix.firewalld:
+    port: "{{ wg_port }}/udp"
+    zone: public
+    permanent: true
+    immediate: true
+    state: enabled
+  when: ansible_os_family == 'RedHat'
+
+- name: Add WireGuard interface to trusted zone in firewalld (Rocky/RHEL)
+  ansible.builtin.command:
+    cmd: firewall-cmd --zone=trusted --add-interface={{ wg_interface }} --permanent
+  register: _wg_fw
+  changed_when: "'already' not in _wg_fw.stdout"
+  failed_when: false
+  when: ansible_os_family == 'RedHat'
+
+- name: Reload firewalld to apply permanent rules (Rocky/RHEL)
+  ansible.builtin.command:
+    cmd: firewall-cmd --reload
+  changed_when: false
+  when: ansible_os_family == 'RedHat'

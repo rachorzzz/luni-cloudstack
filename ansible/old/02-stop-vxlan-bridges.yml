@@ -1,0 +1,64 @@
+-
+--
+# Stops and removes VXLAN overlay + Linux bridges set up by 02-setup-vxlan-bridges.yml.
+# Disables the cloudstack-overlay service so interfaces do not autostart on reboot.
+
+- name: Stop and remove VXLAN overlay and Linux bridges
+  hosts: all
+  become: true
+  gather_facts: false
+
+  tasks:
+
+    # ------------------------------------------------------------------ #
+    #  Stop and disable systemd service                                    #
+    # ------------------------------------------------------------------ #
+
+    - name: Stop and disable cloudstack-overlay service
+      ansible.builtin.systemd:
+        name: cloudstack-overlay
+        state: stopped
+        enabled: false
+      ignore_errors: true
+
+    # ------------------------------------------------------------------ #
+    #  Bring down and delete interfaces                                    #
+    # ------------------------------------------------------------------ #
+
+    - name: Bring down bridges
+      ansible.builtin.shell: |
+        ifdown --force {{ item }} 2>/dev/null || true
+        ip link del {{ item }} 2>/dev/null || true
+      loop:
+        - br-guest
+        - br-storage
+        - br-mgmt
+      changed_when: false
+
+    - name: Bring down VXLAN interfaces
+      ansible.builtin.shell: |
+        ifdown --force {{ item }} 2>/dev/null || true
+        ip link del {{ item }} 2>/dev/null || true
+      loop:
+        - vxlan-guest
+        - vxlan-storage
+        - vxlan-mgmt
+      changed_when: false
+
+    # ------------------------------------------------------------------ #
+    #  Remove config files                                                 #
+    # ------------------------------------------------------------------ #
+
+    - name: Remove interfaces snippet
+      ansible.builtin.file:
+        path: /etc/network/interfaces.d/cloudstack-overlay
+        state: absent
+
+    - name: Remove systemd service file
+      ansible.builtin.file:
+        path: /etc/systemd/system/cloudstack-overlay.service
+        state: absent
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true

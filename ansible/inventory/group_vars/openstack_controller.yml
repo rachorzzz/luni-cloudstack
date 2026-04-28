@@ -1,0 +1,2 @@
+---
+chrony_line: "pool 0.rocky.pool.ntp.org iburst"

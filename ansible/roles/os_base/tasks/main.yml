@@ -1,0 +1,39 @@
+---
+- name: Upgrade all packages
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+
+# Rocky 10 cloud images don't ship all kernel modules. br_netfilter is
+# required by kolla-ansible (OVS/neutron bridge filtering).
+- name: Install kernel-modules-extra (provides br_netfilter and others)
+  ansible.builtin.dnf:
+    name: kernel-modules-extra
+    state: present
+
+- name: Rebuild module dependency files
+  ansible.builtin.command:
+    cmd: depmod -a
+  changed_when: false
+
+- name: Disable SELinux via grubby (takes effect after reboot)
+  ansible.builtin.command:
+    cmd: grubby --update-kernel ALL --args selinux=0
+  changed_when: true
+
+- name: Disable SELinux in running session
+  ansible.builtin.command:
+    cmd: setenforce 0
+  changed_when: false
+  failed_when: false
+
+- name: Stop firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    state: stopped
+  failed_when: false
+
+- name: Mask firewalld
+  ansible.builtin.systemd:
+    name: firewalld
+    masked: true

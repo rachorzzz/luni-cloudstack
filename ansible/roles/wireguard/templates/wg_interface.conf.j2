@@ -9,13 +9,24 @@ PrivateKey = {{ wg_private_key }}
 
 # ── Peers (full mesh) ─────────────────────────────────────────────────────────
 {% for peer in groups['wireguard_mesh'] %}
-{% if peer != inventory_hostname %}
+{% if peer != inventory_hostname and hostvars[peer]['wg_public_key'] is defined %}
 
 # {{ peer }}
 [Peer]
 PublicKey           = {{ hostvars[peer]['wg_public_key'] }}
 Endpoint            = {{ hostvars[peer]['wg_endpoint'] }}:{{ wg_port }}
-AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32
+{% set controller_ip = hostvars[groups['openstack_controller'][0]]['ansible_host'] %}
+{% set peer_has_controller = hostvars[peer]['vms'] | selectattr('ip', 'equalto', controller_ip) | list | length > 0 %}
+AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32{% for vm in hostvars[peer]['vms'] %}, {{ vm.ip }}/32{% endfor %}{% if peer_has_controller %}, 172.16.102.128/25{% endif %}{% for client in hostvars[peer]['wg_clients'] | default([]) %}, {{ client.wg_ip }}/32{% endfor %}
+
 PersistentKeepalive = {{ wg_keepalive }}
 {% endif %}
+{% endfor %}
+{% for client in wg_clients | default([]) %}
+
+# Client: {{ client.name }}
+[Peer]
+PublicKey           = {{ wg_client_keys[client.name].public }}
+AllowedIPs          = {{ client.wg_ip }}/32
+PersistentKeepalive = {{ wg_keepalive }}
 {% endfor %}

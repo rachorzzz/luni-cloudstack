@@ -1,0 +1,315 @@
+---
+# =============================================================================
+# Playbook: 07-kolla-prep.yml
+#
+# Prepares controller-vm as the kolla-ansible deploy host and readies all VMs
+# for the kolla bootstrap/deploy sequence.
+#
+# What this does:
+#   1. Installs kolla-ansible (pip) on controller-vm
+#   2. Deploys globals.yml and multinode inventory to /etc/kolla/ on controller-vm
+#   3. Generates kolla passwords (kolla-genpwd) and sets keystone_admin_password
+#   4. Creates a passwordless SSH keypair on controller-vm (rocky user)
+#   5. Distributes that public key to all VMs so kolla can SSH to compute nodes
+#   6. Creates persistent dummy0 interface on all VMs (Neutron external iface)
+#
+# After running this playbook, SSH into controller-vm and run:
+#   kolla-ansible -i /etc/kolla/multinode bootstrap-servers
+#   kolla-ansible -i /etc/kolla/multinode prechecks
+#   kolla-ansible -i /etc/kolla/multinode deploy
+#   kolla-ansible -i /etc/kolla/multinode post-deploy
+#   source /etc/kolla/admin-openrc.sh
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Play 1: Install kolla-ansible on controller-vm and deploy config
+# ---------------------------------------------------------------------------
+- name: Install kolla-ansible on controller-vm
+  hosts: openstack_controller
+  become: true
+  gather_facts: true
+
+  vars:
+    kolla_config_dir: /etc/kolla
+    kolla_release: "21.0.0"  # kolla-ansible 21.x == OpenStack 2025.1 (Epoxy)
+
+  tasks:
+    - name: Install required system packages
+      ansible.builtin.dnf:
+        name:
+          - python3
+          - python3-pip
+          - python3-devel
+          - gcc
+          - libffi-devel
+          - openssl-devel
+          - git
+        state: present
+
+    - name: Upgrade pip
+      ansible.builtin.pip:
+        name: pip
+        state: latest
+        executable: pip3
+
+    - name: Install kolla-ansible via pip
+      ansible.builtin.pip:
+        name: "kolla-ansible=={{ kolla_release }}.*"
+        state: present
+        executable: pip3
+
+    - name: Install ansible-core (kolla-ansible dependency)
+      ansible.builtin.pip:
+        name:
+          - "ansible-core>=2.18,<2.19"
+          - "docker"
+          - "python-openstackclient"
+        state: present
+        executable: pip3
+
+    - name: Install kolla-ansible Ansible Galaxy requirements
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kolla-ansible install-deps
+      environment:
+        PATH: "/usr/local/bin:{{ ansible_env.PATH }}"
+      changed_when: true
+
+    - name: Add /usr/local/bin to sudo secure_path
+      ansible.builtin.lineinfile:
+        path: /etc/sudoers
+        regexp: '^Defaults\s+secure_path'
+        line: 'Defaults    secure_path = /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/bin'
+        validate: 'visudo -cf %s'
+
+    - name: Create /etc/kolla directory
+      ansible.builtin.file:
+        path: "{{ kolla_config_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy globals.yml from repo
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../kolla/globals.yml"
+        dest: "{{ kolla_config_dir }}/globals.yml"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy multinode inventory from repo
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../kolla/multinode"
+        dest: "{{ kolla_config_dir }}/multinode"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Check if passwords.yml already exists
+      ansible.builtin.stat:
+        path: "{{ kolla_config_dir }}/passwords.yml"
+      register: passwords_file
+
+    - name: Copy skeleton passwords.yml from kolla (if not present)
+      ansible.builtin.command:
+        cmd: "cp /usr/local/share/kolla-ansible/etc_examples/kolla/passwords.yml {{ kolla_config_dir }}/passwords.yml"
+      when: not passwords_file.stat.exists
+      changed_when: true
+
+    - name: Generate kolla passwords with kolla-genpwd
+      ansible.builtin.command:
+        cmd: /usr/local/bin/kolla-genpwd
+      environment:
+        KOLLA_ETC_DIR: "{{ kolla_config_dir }}"
+      when: not passwords_file.stat.exists
+      changed_when: true
+
+    - name: Set keystone_admin_password in passwords.yml
+      ansible.builtin.replace:
+        path: "{{ kolla_config_dir }}/passwords.yml"
+        regexp: '^keystone_admin_password:.*$'
+        replace: "keystone_admin_password: {{ keystone_admin_pass }}"
+
+# ---------------------------------------------------------------------------
+# Play 2: Generate root SSH keypair on controller-vm for kolla
+# ---------------------------------------------------------------------------
+- name: Set up root SSH key on controller-vm for kolla
+  hosts: openstack_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Ensure /root/.ssh exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Generate SSH keypair for root on controller-vm
+      ansible.builtin.command:
+        cmd: ssh-keygen -t ed25519 -C "kolla-deploy@controller-vm" -f /root/.ssh/id_ed25519 -N ""
+        creates: /root/.ssh/id_ed25519
+
+    - name: Read root public key
+      ansible.builtin.slurp:
+        src: /root/.ssh/id_ed25519.pub
+      register: controller_pubkey
+
+    - name: Disable SSH host key checking for 172.16.102.x (root)
+      ansible.builtin.blockinfile:
+        path: /root/.ssh/config
+        create: true
+        owner: root
+        group: root
+        mode: "0600"
+        marker: "# {mark} ANSIBLE MANAGED — kolla no-strict"
+        block: |
+          Host 172.16.102.*
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+
+    - name: Store root public key as fact for next play
+      ansible.builtin.set_fact:
+        kolla_deploy_pubkey: "{{ controller_pubkey.content | b64decode | trim }}"
+
+# ---------------------------------------------------------------------------
+# Play 3: Allow root login and distribute controller-vm root key to all VMs
+# ---------------------------------------------------------------------------
+- name: Enable root SSH access and authorize kolla key on all VMs
+  hosts: openstack_all
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Get controller-vm root public key from hostvars
+      ansible.builtin.set_fact:
+        kolla_deploy_pubkey: "{{ hostvars[groups['openstack_controller'][0]]['kolla_deploy_pubkey'] }}"
+
+    - name: Ensure /root/.ssh exists
+      ansible.builtin.file:
+        path: /root/.ssh
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Authorize controller-vm root key in root's authorized_keys
+      ansible.posix.authorized_key:
+        user: root
+        state: present
+        key: "{{ kolla_deploy_pubkey }}"
+
+    - name: Allow root login via SSH key (prohibit-password = key-only, no password)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin prohibit-password'
+      notify: Restart sshd
+
+  handlers:
+    - name: Restart sshd
+      ansible.builtin.systemd:
+        name: sshd
+        state: restarted
+
+# ---------------------------------------------------------------------------
+# Play 4: Prepare neutron_external_interface on all VMs
+#
+# Controller VM gets a second NIC (ens6) hot-plugged to virbr-wg on the
+# hypervisor, giving br-ex real L2 connectivity to the provider network.
+# IP forwarding is also enabled so the controller can route floating-IP
+# reply traffic (router namespace → gateway 172.16.102.1 → destination).
+#
+# Compute VMs keep dummy0 since they don't run the L3 agent.
+# ---------------------------------------------------------------------------
+- name: Prepare neutron external interface on controller VM
+  hosts: openstack_controller
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Enable IP forwarding (persistent)
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_forward
+        value: "1"
+        state: present
+        sysctl_set: true
+        sysctl_file: /etc/sysctl.d/99-forward.conf
+        reload: true
+
+    - name: Check if ens6 already exists
+      ansible.builtin.command:
+        cmd: ip link show ens6
+      register: ens6_check
+      changed_when: false
+      failed_when: false
+
+    - name: Hot-plug second NIC on controller VM via hypervisor
+      delegate_to: "{{ groups['compute'] | map('extract', hostvars) | selectattr('vms', 'defined') | selectattr('vms', 'search', ansible_host) | map(attribute='inventory_hostname') | first | default(omit) }}"
+      ansible.builtin.shell:
+        cmd: |
+          # Find the libvirt domain that has this VM's IP
+          for domain in $(virsh list --name); do
+            if virsh domiflist "$domain" 2>/dev/null | grep -q virbr-wg; then
+              # Check if this domain already has 2+ NICs
+              NIC_COUNT=$(virsh domiflist "$domain" | grep -c virbr-wg)
+              if [ "$NIC_COUNT" -lt 2 ]; then
+                virsh attach-interface "$domain" bridge virbr-wg --model virtio --live --persistent
+                echo "attached to $domain"
+              else
+                echo "already has $NIC_COUNT NICs"
+              fi
+            fi
+          done
+      when: ens6_check.rc != 0
+      ignore_errors: true
+
+    - name: Bring up ens6
+      ansible.builtin.command:
+        cmd: ip link set ens6 up
+      changed_when: false
+      failed_when: false
+
+    - name: Set ens6 MTU to match virbr-wg
+      ansible.builtin.command:
+        cmd: ip link set ens6 mtu 1420
+      changed_when: false
+      failed_when: false
+
+- name: Create dummy0 interface on compute VMs
+  hosts: openstack_compute
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Load dummy kernel module now
+      community.general.modprobe:
+        name: dummy
+        state: present
+
+    - name: Persist dummy module load via /etc/modules-load.d/
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/dummy.conf
+        content: "dummy\n"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Create NetworkManager connection for dummy0 (persistent across reboots)
+      community.general.nmcli:
+        conn_name: dummy0
+        ifname: dummy0
+        type: dummy
+        ip4: []
+        state: present
+        autoconnect: true
+      ignore_errors: true
+
+    - name: Bring up dummy0
+      ansible.builtin.command:
+        cmd: ip link set dummy0 up
+      changed_when: false
+      failed_when: false
+
