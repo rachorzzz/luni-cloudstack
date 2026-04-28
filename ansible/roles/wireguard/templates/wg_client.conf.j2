@@ -5,7 +5,6 @@
 [Interface]
 Address    = {{ item.wg_ip }}/32
 PrivateKey = {{ wg_client_keys[item.name].private }}
-DNS        = 213.133.100.100
 
 [Peer]
 PublicKey           = {{ wg_public_key }}
