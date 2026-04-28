@@ -18,6 +18,24 @@
     enabled: true
     state: started
 
+# ── Client configs (generated on the server, fetch to control node) ───────────
+
+- name: Generate client WireGuard configs
+  ansible.builtin.template:
+    src: wg_client.conf.j2
+    dest: "{{ wg_config_dir }}/client_{{ item.name }}.conf"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ wg_clients | default([]) }}"
+
+- name: Fetch client configs to control node
+  ansible.builtin.fetch:
+    src: "{{ wg_config_dir }}/client_{{ item.name }}.conf"
+    dest: "{{ playbook_dir }}/../client-configs/{{ inventory_hostname }}_{{ item.name }}.conf"
+    flat: true
+  loop: "{{ wg_clients | default([]) }}"
+
 # ── Firewall ──────────────────────────────────────────────────────────────────
 
 - name: Allow WireGuard port through UFW (Debian)

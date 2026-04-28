@@ -22,3 +22,11 @@ AllowedIPs          = {{ hostvars[peer]['wg_ip'] }}/32{% for vm in hostvars[peer
 PersistentKeepalive = {{ wg_keepalive }}
 {% endif %}
 {% endfor %}
+{% for client in wg_clients | default([]) %}
+
+# Client: {{ client.name }}
+[Peer]
+PublicKey           = {{ wg_client_keys[client.name].public }}
+AllowedIPs          = {{ client.wg_ip }}/32
+PersistentKeepalive = {{ wg_keepalive }}
+{% endfor %}
