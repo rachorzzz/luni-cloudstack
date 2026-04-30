@@ -90,6 +90,33 @@
       notify: Reapply virbr-wg
       when: ansible_os_family == 'Debian'
 
+    - name: Apply virbr-wg routes now (Debian)
+      ansible.builtin.shell:
+        cmd: |
+          set -e
+          {% for vm in vms %}
+          ip route replace {{ vm.ip }}/32 dev {{ virbr_wg_name }}
+          {% endfor %}
+          {% for peer in groups['compute'] | reject('equalto', inventory_hostname) %}
+          {% for vm in hostvars[peer]['vms'] %}
+          ip route replace {{ vm.ip }}/32 via {{ hostvars[peer]['wg_ip'] }}
+          {% endfor %}
+          {% endfor %}
+          {% set controller_ip = hostvars[groups['openstack_controller'][0]]['ansible_host'] %}
+          {% set ns = namespace(found='') %}
+          {% for host in groups['compute'] %}
+          {% for vm in hostvars[host]['vms'] %}
+          {% if vm.ip == controller_ip %}{% set ns.found = host %}{% endif %}
+          {% endfor %}
+          {% endfor %}
+          {% if ns.found == inventory_hostname %}
+          ip route replace 172.16.102.128/25 dev {{ virbr_wg_name }}
+          {% else %}
+          ip route replace 172.16.102.128/25 via {{ hostvars[ns.found]['wg_ip'] }} dev {{ wg_interface }}
+          {% endif %}
+      changed_when: false
+      when: ansible_os_family == 'Debian'
+
     # ── Rocky bridge ──────────────────────────────────────────────────────────
     # NM-managed bridges fight with libvirt: NM removes vnet interfaces that
     # libvirt dynamically adds as bridge ports.  We create the bridge with a
@@ -227,7 +254,7 @@
           [Unit]
           Description=Apply virbr-wg VM routes
           After=network.target wg-quick@{{ wg_interface }}.service virbr-wg-setup.service
-          Wants=wg-quick@{{ wg_interface }}.service
+          BindsTo=wg-quick@{{ wg_interface }}.service
           Requires=virbr-wg-setup.service
 
           [Service]

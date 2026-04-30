@@ -1,0 +1,2 @@
+---
+chrony_line: "server 172.16.102.1 iburst"

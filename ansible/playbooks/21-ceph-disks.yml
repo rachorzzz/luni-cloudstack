@@ -1,0 +1,94 @@
+---
+# =============================================================================
+# Playbook: 21-ceph-disks.yml
+#
+# Creates raw OSD disk images and attaches them to VMs that have an `osd_disk`
+# attribute defined in inventory. Runs on hypervisors (wireguard_mesh) and
+# filters VMs by the presence of osd_disk.
+#
+# Inventory example:
+#   vms:
+#     - {name: ceph-vm-1, ip: 172.16.102.41, ram: 8192, disk: 50G, osd_disk: 100G}
+#
+# Run after 05-create-vms.yml once the Ceph VMs are booted.
+#
+# Usage:
+#   ansible-playbook playbooks/21-ceph-disks.yml
+# =============================================================================
+
+- name: Attach Ceph OSD disks to VMs
+  hosts: wireguard_mesh
+  become: true
+  gather_facts: false
+
+  vars:
+    images_dir: /var/lib/libvirt/images
+    osd_device: vdb
+    osd_vms: "{{ vms | default([]) | selectattr('osd_disk', 'defined') | list }}"
+
+  tasks:
+
+    - name: Skip hosts without OSD VMs
+      ansible.builtin.meta: end_host
+      when: osd_vms | length == 0
+
+    - name: Show OSD VMs found on this host
+      ansible.builtin.debug:
+        msg: "OSD VMs on {{ inventory_hostname }}: {{ osd_vms | map(attribute='name') | list }}"
+
+    - name: Create raw OSD disk image
+      ansible.builtin.command:
+        cmd: >
+          qemu-img create -f raw
+          {{ images_dir }}/{{ vm.name }}-osd.raw
+          {{ vm.osd_disk }}
+        creates: "{{ images_dir }}/{{ vm.name }}-osd.raw"
+      loop: "{{ osd_vms }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm.name }} ({{ vm.osd_disk }})"
+
+    - name: Check current block devices attached to VM
+      ansible.builtin.command:
+        cmd: virsh domblklist {{ vm.name }} --details
+      loop: "{{ osd_vms }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm.name }}"
+      register: domblklist
+      changed_when: false
+      failed_when: false
+
+    - name: Attach OSD disk to VM (live + persistent)
+      ansible.builtin.command:
+        cmd: >
+          virsh attach-disk {{ item.vm.name }}
+          {{ images_dir }}/{{ item.vm.name }}-osd.raw
+          {{ osd_device }}
+          --driver qemu
+          --subdriver raw
+          --persistent
+          --live
+      loop: "{{ domblklist.results }}"
+      loop_control:
+        label: "{{ item.vm.name }}"
+      when: >
+        item.rc == 0 and
+        (images_dir + '/' + item.vm.name + '-osd.raw') not in item.stdout
+
+    - name: Verify final disk layout for each OSD VM
+      ansible.builtin.command:
+        cmd: virsh domblklist {{ vm.name }} --details
+      loop: "{{ osd_vms }}"
+      loop_control:
+        loop_var: vm
+        label: "{{ vm.name }}"
+      register: verify_result
+      changed_when: false
+
+    - name: Show disk layout
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+      loop: "{{ verify_result.results }}"
+      loop_control:
+        label: "{{ item.vm.name }}"
