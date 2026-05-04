@@ -1,0 +1,181 @@
+---
+# =============================================================================
+# Playbook: 23-kolla-ceph-config.yml
+#
+# Wires Ceph into Kolla-Ansible by:
+#   1. Fetching ceph.conf + service keyrings from main-hp-ceph1
+#   2. Placing them under /etc/kolla/config/ on controller-vm with the exact
+#      directory layout Kolla expects:
+#        config/glance/          — ceph.conf + ceph.client.glance.keyring
+#        config/cinder/          — ceph.conf
+#        config/cinder/cinder-volume/  — ceph.conf + ceph.client.cinder.keyring
+#        config/cinder/cinder-backup/  — ceph.conf
+#        config/nova/            — ceph.conf + keyrings + nova-compute.conf
+#   3. Redeploying globals.yml (Ceph backends enabled)
+#
+# Run this after 22-ceph-install.yml and before kolla-ansible deploy.
+# =============================================================================
+
+- name: Deploy Ceph config files to Kolla config directory
+  hosts: openstack_controller
+  become: true
+  gather_facts: false
+
+  vars:
+    ceph_bootstrap_host: main-hp-ceph1
+    kolla_config_dir: /etc/kolla
+
+  tasks:
+
+    - name: Slurp ceph.conf from bootstrap host
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.conf
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      register: ceph_conf_raw
+
+    # cephadm writes v2 msgr addresses ([v2:ip:3300/0,v1:ip:6789/0]) which
+    # Kolla containers don't support. Extract fsid + plain IPs and rebuild.
+    - name: Build plain-IP ceph.conf for Kolla
+      ansible.builtin.set_fact:
+        ceph_conf_content: |
+          [global]
+          fsid = {{ (ceph_conf_raw.content | b64decode) | regex_search('fsid\s*=\s*([a-f0-9-]+)', '\1') | first }}
+          mon_host = {{ (ceph_conf_raw.content | b64decode) | regex_findall('v2:(\d+\.\d+\.\d+\.\d+):') | join(',') }}
+          auth_cluster_required = cephx
+          auth_service_required = cephx
+          auth_client_required = cephx
+
+    - name: Slurp Glance keyring
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.client.glance.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      register: glance_keyring
+
+    - name: Slurp Cinder keyring
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.client.cinder.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      register: cinder_keyring
+
+    - name: Slurp Nova keyring
+      ansible.builtin.slurp:
+        src: /etc/ceph/ceph.client.nova.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      register: nova_keyring
+
+    - name: Create config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ kolla_config_dir }}/config"
+        - "{{ kolla_config_dir }}/config/glance"
+        - "{{ kolla_config_dir }}/config/cinder"
+        - "{{ kolla_config_dir }}/config/cinder/cinder-volume"
+        - "{{ kolla_config_dir }}/config/cinder/cinder-backup"
+        - "{{ kolla_config_dir }}/config/nova"
+
+    # --- top-level ceph.conf (shared reference) ---
+
+    - name: Deploy top-level ceph.conf
+      ansible.builtin.copy:
+        content: "{{ ceph_conf_content }}"
+        dest: "{{ kolla_config_dir }}/config/ceph.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    # --- Glance ---
+
+    - name: Deploy ceph.conf for Glance
+      ansible.builtin.copy:
+        content: "{{ ceph_conf_content }}"
+        dest: "{{ kolla_config_dir }}/config/glance/ceph.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy Glance keyring
+      ansible.builtin.copy:
+        content: "{{ glance_keyring.content | b64decode }}"
+        dest: "{{ kolla_config_dir }}/config/glance/ceph.client.glance.keyring"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # --- Cinder ---
+
+    - name: Deploy ceph.conf for Cinder (top-level + subservices)
+      ansible.builtin.copy:
+        content: "{{ ceph_conf_content }}"
+        dest: "{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - "{{ kolla_config_dir }}/config/cinder/ceph.conf"
+        - "{{ kolla_config_dir }}/config/cinder/cinder-volume/ceph.conf"
+        - "{{ kolla_config_dir }}/config/cinder/cinder-backup/ceph.conf"
+
+    - name: Deploy Cinder keyring (cinder-volume subdir)
+      ansible.builtin.copy:
+        content: "{{ cinder_keyring.content | b64decode }}"
+        dest: "{{ kolla_config_dir }}/config/cinder/cinder-volume/ceph.client.cinder.keyring"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # --- Nova ---
+
+    - name: Deploy ceph.conf for Nova
+      ansible.builtin.copy:
+        content: "{{ ceph_conf_content }}"
+        dest: "{{ kolla_config_dir }}/config/nova/ceph.conf"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Deploy Nova keyring
+      ansible.builtin.copy:
+        content: "{{ nova_keyring.content | b64decode }}"
+        dest: "{{ kolla_config_dir }}/config/nova/ceph.client.nova.keyring"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # Nova compute needs the Cinder keyring for attaching Ceph-backed Cinder volumes
+    - name: Deploy Cinder keyring to Nova config dir
+      ansible.builtin.copy:
+        content: "{{ cinder_keyring.content | b64decode }}"
+        dest: "{{ kolla_config_dir }}/config/nova/ceph.client.cinder.keyring"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Deploy nova-compute.conf with libvirt RBD settings
+      ansible.builtin.copy:
+        dest: "{{ kolla_config_dir }}/config/nova/nova-compute.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [libvirt]
+          images_rbd_pool = vms
+          images_type = rbd
+          images_rbd_ceph_conf = /etc/ceph/ceph.conf
+          rbd_user = nova
+
+    - name: Redeploy globals.yml (Ceph backends now enabled)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../kolla/globals.yml"
+        dest: "{{ kolla_config_dir }}/globals.yml"
+        owner: root
+        group: root
+        mode: "0644"

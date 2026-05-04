@@ -41,7 +41,7 @@ enable_nova: "yes"
 enable_neutron: "yes"
 enable_horizon: "yes"
 
-enable_cinder: "no"
+enable_cinder: "yes"
 enable_heat: "no"
 enable_barbican: "no"
 enable_octavia: "no"
@@ -73,9 +73,26 @@ neutron_bridge_name: "br-ex"
 # Glance
 # =============================================================================
 
-# Local file backend (no Ceph/NFS)
-glance_backend_file: "yes"
-glance_backend_ceph: "no"
+glance_backend_file: "no"
+glance_backend_ceph: "yes"
+ceph_glance_user: "glance"
+ceph_glance_pool_name: "images"
+
+# =============================================================================
+# Cinder
+# =============================================================================
+
+cinder_backend_ceph: "yes"
+ceph_cinder_user: "cinder"
+ceph_cinder_pool_name: "volumes"
+
+# =============================================================================
+# Nova / Ceph
+# =============================================================================
+
+nova_backend_ceph: "yes"
+ceph_nova_user: "nova"
+ceph_nova_pool_name: "vms"
 
 # =============================================================================
 # Docker
