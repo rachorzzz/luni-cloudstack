@@ -7,8 +7,6 @@ HOSTS=(
   "main-hp"
   "main-1"
   "main-2"
-  "hp-01"
-  "hp-02"
 )
 
 SSH_OPTS="-i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=no"

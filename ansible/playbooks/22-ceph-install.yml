@@ -1,0 +1,132 @@
+- name: Install and configure Ceph cluster
+  hosts: ceph
+  become: true
+  gather_facts: false
+
+  vars:
+    images_dir: /var/lib/libvirt/images
+    osd_device: vdb
+    osd_vms: "{{ vms | default([]) | selectattr('osd_disk', 'defined') | list }}"
+    ceph_version: 20.2.1
+    ceph_url: "https://download.ceph.com/rpm-{{ ceph_version }}/el9/noarch/cephadm"
+    ceph_bootstrap_host: main-hp-ceph1
+    ceph_bootstrap_ip: 172.16.102.41
+    ceph_additional_hosts:
+      - name: main-1-ceph2
+        ip: 172.16.102.51
+      - name: main-2-ceph3
+        ip: 172.16.102.61
+    ceph_pools:
+      - {name: volumes, pg_num: 32}
+      - {name: images, pg_num: 32}
+      - {name: vms, pg_num: 32}
+
+  tasks:
+
+    - name: Pull cephadm binary
+      ansible.builtin.get_url:
+        url: "{{ ceph_url }}"
+        dest: /usr/local/bin/cephadm
+        mode: "0555"
+        owner: root
+        group: root
+
+    - name: Install podman
+      ansible.builtin.package:
+        name: podman
+        state: present
+
+    - name: Bootstrap Ceph cluster
+      ansible.builtin.command:
+        cmd: >-
+          cephadm bootstrap
+          --mon-ip {{ ceph_bootstrap_ip }}
+          --skip-mon-network
+        creates: /etc/ceph/ceph.conf
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+
+    - name: Add additional hosts to Ceph cluster
+      ansible.builtin.shell: |
+        ceph orch host ls --format json | grep -q '"{{ item.name }}"' ||
+        ceph orch host add {{ item.name }} {{ item.ip }}
+      loop: "{{ ceph_additional_hosts }}"
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      changed_when: true
+
+    - name: Apply OSDs to all available devices
+      ansible.builtin.command:
+        cmd: ceph orch apply osd --all-available-devices
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      changed_when: false
+
+    - name: Add mon daemons to additional hosts
+      ansible.builtin.shell: |
+        ceph orch ps --format json | grep -q '"mon.{{ item.name }}"' ||
+        ceph orch daemon add mon {{ item.name }}:{{ item.ip }}
+      loop: "{{ ceph_additional_hosts }}"
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      changed_when: true
+
+    - name: Create Ceph OSD pools
+      ansible.builtin.shell: |
+        ceph osd pool ls | grep -qx '{{ item.name }}' ||
+        ceph osd pool create {{ item.name }} {{ item.pg_num }}
+      loop: "{{ ceph_pools }}"
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+      changed_when: true
+
+    - name: Create Ceph auth keyring for Glance
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - auth
+          - get-or-create
+          - client.glance
+          - mon
+          - profile rbd
+          - osd
+          - profile rbd pool=images
+          - -o
+          - /etc/ceph/ceph.client.glance.keyring
+        creates: /etc/ceph/ceph.client.glance.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+
+    - name: Create Ceph auth keyring for Cinder
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - auth
+          - get-or-create
+          - client.cinder
+          - mon
+          - profile rbd
+          - osd
+          - profile rbd pool=volumes, profile rbd pool=vms, profile rbd pool=images
+          - -o
+          - /etc/ceph/ceph.client.cinder.keyring
+        creates: /etc/ceph/ceph.client.cinder.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
+
+    - name: Create Ceph auth keyring for Nova
+      ansible.builtin.command:
+        argv:
+          - ceph
+          - auth
+          - get-or-create
+          - client.nova
+          - mon
+          - profile rbd
+          - osd
+          - profile rbd pool=vms
+          - -o
+          - /etc/ceph/ceph.client.nova.keyring
+        creates: /etc/ceph/ceph.client.nova.keyring
+      delegate_to: "{{ ceph_bootstrap_host }}"
+      run_once: true
